@@ -1,6 +1,6 @@
 symbols:
-  XAUUSD: "XAUUSD"
-  NAS100: "NDX100"
+  XAUUSD: "GOLD"
+  NAS100: "US100Cash"
   EURUSD: "EURUSD"
   GBPJPY: "GBPJPY"
 
