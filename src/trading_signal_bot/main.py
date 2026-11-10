@@ -39,6 +39,7 @@ from trading_signal_bot.repositories.signal_journal import SignalJournal
 from trading_signal_bot.settings import AppConfig, SecretsConfig, load_secrets, load_yaml_config
 from trading_signal_bot.strategy import M15Trigger, StrategyEvaluator
 from trading_signal_bot.telegram_notifier import TelegramNotifier
+from trading_signal_bot.web_feed import FeedSubscriber, WebSignalPublisher, load_feed_config
 from trading_signal_bot.utils import (
     atomic_write_json,
     seconds_until_next_m1_close,
@@ -68,6 +69,7 @@ class TradingSignalBotApp:
         self._config = config
         self._secrets = secrets
         self._dry_run = dry_run
+        self._web_publisher: WebSignalPublisher | None = None
         self._logger = logging.getLogger(self.__class__.__name__)
         self._last_processed_m15_close: dict[str, datetime] = {}
         self._last_processed_m1_close: dict[str, datetime] = {}
@@ -847,10 +849,21 @@ class TradingSignalBotApp:
             is_live_bar=base.is_live_bar,
         )
 
+    def set_web_publisher(self, publisher: WebSignalPublisher | None) -> None:
+        self._web_publisher = publisher
+
+    def notify_text(self, text: str) -> bool:
+        """Plain text to the owner's own Telegram chat (shared alerts from followed bots)."""
+        return self._telegram.send_text(text)
+
     def _send_with_record(self, signal: Signal, context: str) -> bool:
         sent = self._telegram.send_signal(signal)
         if sent:
             self._dedup.record(signal)
+            if self._web_publisher is not None:
+                self._web_publisher.publish(
+                    signal
+                )  # non-blocking, never raises: Telegram stays the source of truth
             if self._journal is not None:
                 self._journal.record_sent_signal(signal, sent_success=True)
             self._logger.info(
@@ -971,15 +984,33 @@ def main() -> None:
     with single_instance_lock(args.lock_file):
         app = TradingSignalBotApp(config=config, secrets=secrets, dry_run=args.dry_run)
         poller: RemotePoller | None = None
+        publisher: WebSignalPublisher | None = None
+        subscriber: FeedSubscriber | None = None
         if sync is not None and remote_cfg is not None:
             poller = RemotePoller(sync, remote_cfg.poll_seconds, app.request_restart)
             poller.start()
+        feed_cfg = load_feed_config(os.environ)
+        if remote_cfg is not None and not args.dry_run and not args.no_remote:
+            if feed_cfg.publish:
+                publisher = WebSignalPublisher(remote_cfg)
+                publisher.start()
+                app.set_web_publisher(publisher)
+                logger.info("publishing alerts to the website (XM_PUBLISH_SIGNALS)")
+            if feed_cfg.follow:
+                subscriber = FeedSubscriber(
+                    remote_cfg, app.notify_text, feed_cfg.feed_poll_seconds, feed_cfg.cursor_file
+                )
+                subscriber.start()
+                logger.info(
+                    "forwarding alerts shared by followed bots to your Telegram (XM_FOLLOW_FEED)"
+                )
         try:
             app.startup()
             app.run_forever()
         finally:
-            if poller is not None:
-                poller.stop()
+            for worker in (poller, publisher, subscriber):
+                if worker is not None:
+                    worker.stop()
     if app.exit_code:
         sys.exit(app.exit_code)
 

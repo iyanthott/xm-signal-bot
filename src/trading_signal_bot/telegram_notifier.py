@@ -74,6 +74,14 @@ class TelegramNotifier:
         ok, _ = self._send_message_with_retry(content)
         return ok
 
+    def send_text(self, text: str) -> bool:
+        """Send a plain-text message to this notifier's own chat (used for alerts shared by followed bots). Best effort, no queue."""
+        if self._dry_run:
+            self._logger.info("DRY RUN text: %s", text.splitlines()[0] if text else "")
+            return True
+        ok, _ = self._send_message_with_retry(text)
+        return ok
+
     def retry_failed_queue(self) -> int:
         items = self._load_queue()
         if not items:
