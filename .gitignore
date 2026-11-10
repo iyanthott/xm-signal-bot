@@ -38,3 +38,7 @@ AGENTS.md
 Thumbs.db
 .vscode/
 .idea/
+
+# Generated from the website settings (see remote_settings.py)
+config/settings.effective.yaml
+config/.settings.candidate.yaml

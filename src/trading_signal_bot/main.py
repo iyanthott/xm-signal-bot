@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import logging
+import os
 import signal as signal_module
 import sys
 import time
@@ -26,6 +27,13 @@ from trading_signal_bot.models import (
     TriggerMode,
 )
 from trading_signal_bot.mt5_client import MT5Client, ReconnectConfig
+from trading_signal_bot.remote_settings import (
+    RESTART_EXIT_CODE,
+    RemotePoller,
+    RemoteSettingsClient,
+    SettingsSync,
+    load_remote_config,
+)
 from trading_signal_bot.repositories.dedup_store import DedupStore
 from trading_signal_bot.repositories.signal_journal import SignalJournal
 from trading_signal_bot.settings import AppConfig, SecretsConfig, load_secrets, load_yaml_config
@@ -44,6 +52,7 @@ from trading_signal_bot.utils import (
 class TradingSignalBotApp:
     _PENDING_SETUP_MAX_AGE = timedelta(hours=8)
     _MAX_CONSECUTIVE_FAILURES = 10
+    _RESTART_MAX_DEFER = timedelta(minutes=30)
 
     def __init__(
         self,
@@ -71,6 +80,10 @@ class TradingSignalBotApp:
         self._last_heartbeat_at: datetime | None = None
         self._consecutive_failures: int = 0
         self._shutdown_requested: bool = False
+        # Remote-settings restart: set by the poller thread, acted on at a quiet moment (see _restart_if_due).
+        self.exit_code: int = 0
+        self._restart_version: int | None = None
+        self._restart_not_after: datetime | None = None
         # Per-symbol health counters are runtime-only and reset on restart.
         self._symbol_failure_counts: dict[str, int] = {}
         self._symbol_degraded_since: dict[str, datetime] = {}
@@ -175,6 +188,33 @@ class TradingSignalBotApp:
 
         self._run_forever_m15_only()
 
+    def request_restart(self, version: int) -> None:
+        """Called from the settings poller thread: new validated settings are on disk, restart when it is safe."""
+        if self._restart_version is None:
+            self._restart_not_after = utc_now() + self._RESTART_MAX_DEFER
+        self._restart_version = version
+        self._logger.info("settings v%s ready; will restart at the next quiet moment", version)
+
+    def _restart_if_due(self) -> bool:
+        """Quiet moment = no M15->M1 setup in flight (they are memory-only), or 30 minutes of waiting have passed."""
+        if self._restart_version is None:
+            return False
+        in_flight = any(bool(per_symbol) for per_symbol in self._pending_setups.values())
+        if (
+            in_flight
+            and self._restart_not_after is not None
+            and utc_now() < self._restart_not_after
+        ):
+            return False
+        self.exit_code = RESTART_EXIT_CODE
+        self._shutdown_requested = True
+        return True
+
+    def _shutdown_reason(self) -> str:
+        if self.exit_code == RESTART_EXIT_CODE and self._restart_version is not None:
+            return f"applying settings v{self._restart_version} (automatic restart)"
+        return "signal received" if self._shutdown_requested else "interrupt"
+
     def _install_signal_handlers(self) -> None:
         """Install graceful shutdown handlers for SIGTERM/SIGINT."""
 
@@ -221,7 +261,7 @@ class TradingSignalBotApp:
                     wait_seconds = seconds_until_next_m15_close()
                 self._logger.info("sleeping %.2fs until next M15 close", wait_seconds)
                 self._interruptible_sleep(wait_seconds)
-                if self._shutdown_requested:
+                if self._shutdown_requested or self._restart_if_due():
                     break
 
                 self._run_m15_cycle()
@@ -246,7 +286,7 @@ class TradingSignalBotApp:
                     )
                 self._interruptible_sleep(self._config.execution.loop_failure_sleep_seconds)
 
-        self._graceful_shutdown("signal received" if self._shutdown_requested else "interrupt")
+        self._graceful_shutdown(self._shutdown_reason())
 
     def _run_forever_with_m1_only(self) -> None:
         while not self._shutdown_requested:
@@ -257,7 +297,7 @@ class TradingSignalBotApp:
                     wait_seconds = seconds_until_next_m1_close()
                 self._logger.info("sleeping %.2fs until next M1 close", wait_seconds)
                 self._interruptible_sleep(wait_seconds)
-                if self._shutdown_requested:
+                if self._shutdown_requested or self._restart_if_due():
                     break
 
                 if self._config.live_bar.enabled:
@@ -287,7 +327,7 @@ class TradingSignalBotApp:
                     )
                 self._interruptible_sleep(self._config.execution.loop_failure_sleep_seconds)
 
-        self._graceful_shutdown("signal received" if self._shutdown_requested else "interrupt")
+        self._graceful_shutdown(self._shutdown_reason())
 
     def _send_health_alert(self, message: str) -> None:
         """Send a health alert via the health alerter. Best-effort, never raises."""
@@ -882,14 +922,35 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--config", type=Path, default=Path("config/settings.yaml"))
     parser.add_argument("--env", type=Path, default=Path(".env"))
     parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument(
+        "--no-remote",
+        action="store_true",
+        help="ignore the website settings even if XM_SETTINGS_TOKEN is set",
+    )
+    parser.add_argument(
+        "--remote-check",
+        action="store_true",
+        help="fetch + validate the website settings, print the result, exit (changes nothing)",
+    )
     parser.add_argument("--lock-file", type=Path, default=Path("data/bot.lock"))
     return parser.parse_args()
 
 
 def main() -> None:
     args = parse_args()
-    config = load_yaml_config(args.config)
-    secrets = load_secrets(args.env)
+    secrets = load_secrets(args.env)  # also loads .env into the environment
+    remote_cfg = load_remote_config(os.environ)
+
+    if args.remote_check:
+        sys.exit(_remote_check(args.config, remote_cfg))
+
+    sync: SettingsSync | None = None
+    config_path = args.config
+    if remote_cfg is not None and not args.dry_run and not args.no_remote:
+        sync = SettingsSync(args.config, RemoteSettingsClient(remote_cfg))
+        config_path = sync.prepare_startup()
+
+    config = load_yaml_config(config_path)
     setup_logging(
         level=config.logging.level,
         file_path=config.logging.file,
@@ -898,12 +959,61 @@ def main() -> None:
         timezone=config.logging.timezone,
     )
     logger = logging.getLogger("main")
-    logger.info("starting trading signal bot dry_run=%s", args.dry_run)
+    logger.info(
+        "starting trading signal bot dry_run=%s settings_file=%s website_version=%s",
+        args.dry_run,
+        config_path.name,
+        sync.running_version if sync else None,
+    )
+    if remote_cfg is not None and sync is None:
+        logger.info("website settings disabled for this run (dry-run or --no-remote)")
 
     with single_instance_lock(args.lock_file):
         app = TradingSignalBotApp(config=config, secrets=secrets, dry_run=args.dry_run)
-        app.startup()
-        app.run_forever()
+        poller: RemotePoller | None = None
+        if sync is not None and remote_cfg is not None:
+            poller = RemotePoller(sync, remote_cfg.poll_seconds, app.request_restart)
+            poller.start()
+        try:
+            app.startup()
+            app.run_forever()
+        finally:
+            if poller is not None:
+                poller.stop()
+    if app.exit_code:
+        sys.exit(app.exit_code)
+
+
+def _remote_check(base_config: Path, remote_cfg: object) -> int:
+    """Read-only diagnostic: can this PC reach the website with its token, and would the current version validate?"""
+    from trading_signal_bot.remote_settings import RemoteConfig, map_to_yaml
+
+    if not isinstance(remote_cfg, RemoteConfig):
+        print("Website settings are OFF: XM_SETTINGS_TOKEN is not set in .env")
+        return 2
+    res = RemoteSettingsClient(remote_cfg).fetch(None)
+    if res.kind != "new" or res.settings is None:
+        print(f"FAILED: {res.message or res.kind}")
+        return 1
+    import tempfile
+
+    import yaml
+
+    with base_config.open("r", encoding="utf-8") as fh:
+        base = yaml.safe_load(fh)
+    try:
+        merged = map_to_yaml(base, res.settings)
+        with tempfile.TemporaryDirectory() as tmp:
+            candidate = Path(tmp) / "settings" / "candidate.yaml"
+            candidate.parent.mkdir()
+            candidate.write_text(yaml.safe_dump(merged, sort_keys=False), encoding="utf-8")
+            load_yaml_config(candidate)
+    except Exception as exc:
+        print(f"Website version {res.version} would be REJECTED by the bot: {exc}")
+        return 1
+    markets = ", ".join(f"{k}->{v}" for k, v in merged["symbols"].items())
+    print(f"OK: website version {res.version} reachable and valid. Markets: {markets}")
+    return 0
 
 
 def _closed_bars_only(df: pd.DataFrame) -> pd.DataFrame:

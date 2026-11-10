@@ -74,6 +74,35 @@ M1-only config:
 python -m poetry run trading-signal-bot --config config/settings.m1_only.yaml
 ```
 
+## Website Settings (XM Signals)
+
+Optional. Lets you edit the bot's settings from the XM Signals website (pogingkita.stayatdiez.com) instead of editing
+`config/settings.yaml`. Every save on the website is a numbered version; the bot applies new versions automatically.
+
+1. On the website, Super Admin: **Bot connection -> Create token**. Copy it (shown once).
+2. In `.env` set `XM_SETTINGS_TOKEN=<token>` (and `XM_SETTINGS_URL` if different from the default).
+3. Check the connection (read-only, changes nothing):
+
+```powershell
+python -m poetry run trading-signal-bot --remote-check
+```
+
+4. Run the bot through the supervisor so it can restart itself when new settings arrive:
+
+```powershell
+.\scripts\run_supervised.ps1
+```
+
+How it behaves:
+- Polls the website about once a minute over outbound HTTPS. Nothing on this PC is exposed.
+- Each new version is merged onto `config/settings.yaml`, validated with the bot's own loader, and written to
+  `config/settings.effective.yaml`. A version the loader rejects is **never applied**: the bot keeps its last good
+  settings and reports the problem to the website.
+- It restarts at a quiet moment (no M15 -> M1 setup in flight, waiting at most 30 minutes) with exit code 75.
+- If the website is unreachable, the bot keeps running on its last good settings (cached in `data/remote_settings_state.json`).
+- Only editable fields come from the website. Paths, logging, Telegram queue and all credentials stay local in `.env`.
+- Turn it off for one run with `--no-remote`, or remove `XM_SETTINGS_TOKEN`. `--dry-run` also ignores the website.
+
 ## One-Click Local Launch
 
 If included in your branch/workspace:
