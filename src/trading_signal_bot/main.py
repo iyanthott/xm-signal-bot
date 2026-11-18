@@ -993,6 +993,9 @@ def main() -> None:
         config_path = sync.prepare_startup()
 
     config = load_yaml_config(config_path)
+    extra = _parse_extra_markets(os.environ.get("XM_EXTRA_MARKETS"))
+    if extra:
+        config = replace(config, symbols={**config.symbols, **extra})
     setup_logging(
         level=config.logging.level,
         file_path=config.logging.file,
@@ -1085,6 +1088,18 @@ def _remote_check(base_config: Path, remote_cfg: object) -> int:
     markets = ", ".join(f"{k}->{v}" for k, v in merged["symbols"].items())
     print(f"OK: website version {res.version} reachable and valid. Markets: {markets}")
     return 0
+
+
+def _parse_extra_markets(raw: str | None) -> dict[str, str]:
+    """XM_EXTRA_MARKETS="US500=US500Cash,AUDUSD" -> {label: mt5 symbol}; local additions on top of the website's markets."""
+    out: dict[str, str] = {}
+    for part in (raw or "").split(","):
+        part = part.strip()
+        if not part:
+            continue
+        label, _, broker = part.partition("=")
+        out[label.strip()] = (broker or label).strip()
+    return out
 
 
 def _closed_bars_only(df: pd.DataFrame) -> pd.DataFrame:
