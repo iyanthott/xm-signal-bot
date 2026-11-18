@@ -1,0 +1,101 @@
+# M1 BOT (second instance, M1-only signals). Run with scripts/run_m1_bot.ps1
+symbols:
+  XAUUSD: "GOLD"
+  EURUSD: "EURUSD"
+  NAS100: "US100Cash"
+
+timeframes:
+  primary: M15
+  confirmation: M1
+
+indicators:
+  lwma:
+    fast: 200
+    slow: 350
+  stochastic:
+    k: 30
+    d: 10
+    slowing: 10
+    buy_zone: [0, 20]
+    sell_zone: [80, 100]
+
+data:
+  candle_buffer: 450
+  min_valid_closed_bars: 2
+
+execution:
+  reconnect_max_retries: 5
+  reconnect_base_delay_seconds: 1
+  reconnect_max_delay_seconds: 30
+  loop_failure_sleep_seconds: 60
+  max_m15_backfill_bars: 16
+
+signal_dedup:
+  cooldown_minutes: 15
+  retention_days: 14
+  state_file: data/m1/dedup_state.json
+
+logging:
+  level: INFO
+  file: logs/m1_bot.log
+  max_bytes: 5242880
+  backup_count: 3
+  timezone: Asia/Phnom_Penh
+
+telegram:
+  failed_queue_file: data/m1/failed_signals.json
+  max_queue_size: 50
+  max_retries: 3
+  max_failed_retry_count: 12
+  request_timeout_seconds: 15
+
+m1_only:
+  enabled: true
+
+live_bar:
+  enabled: false
+  poll_interval_seconds: 15
+
+strategy:
+  enable_legacy_scenarios: false
+  chain:
+    enabled: false
+    require_opposite_zone_on_lwma_cross: true
+  summary:
+    enabled: false
+
+session_filter:
+  enabled: true
+  timezone: Asia/Phnom_Penh
+  windows:
+    - start: "07:00"
+      end: "23:00"
+
+regime_filter:
+  enabled: true
+  adx_period: 14
+  min_adx: 25.0
+
+risk_context:
+  enabled: true
+  atr_period: 14
+  atr_stop_multiplier: 1.0
+  rr_targets: [1.0, 2.0]
+
+monitoring:
+  heartbeat_enabled: true
+  heartbeat_interval_seconds: 300
+  heartbeat_ping_url: ""
+  heartbeat_file: data/m1/heartbeat.json
+
+journal:
+  enabled: true
+  sqlite_path: data/m1/signals.db
+
+health_alerts:
+  enabled: true
+  chat_id: ""  # empty = reuse signal chat_id from .env
+  throttle_minutes: 15
+  symbol_degradation_enabled: true
+  symbol_degradation_threshold_cycles: 3
+  symbol_recovery_alerts: true

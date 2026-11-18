@@ -187,3 +187,31 @@ def test_config_defaults_off_and_validation():
     assert cfg.symbols == ("XAUUSD", "NAS100", "EURUSD")
     with pytest.raises(ValueError):
         load_trade_config({"XM_TRADE_RISK_PCT": "50"})
+
+
+def test_m1_bot_scenarios_magic_and_label(tmp_path):
+    from trading_signal_bot.trader import _parse_scenarios
+
+    mt5 = FakeMT5()
+    msgs: list[str] = []
+    cfg = TradeConfig(
+        enabled=True, kill_file=tmp_path / "P", state_file=tmp_path / "m1.json", magic=570032,
+        scenarios=_parse_scenarios("BUY_M1,SELL_M1"), label="[M1]",
+    )
+    t = DemoTrader(cfg, mt5, lambda s: s, lambda m: msgs.append(m) or True, now_fn=lambda: NOW)
+    t.on_signal(make_signal(scenario=Scenario.BUY_S1))  # legacy is not this bot's job
+    assert mt5.sent == []
+    t.on_signal(make_signal(scenario=Scenario.BUY_M1, dist=1.7))
+    assert mt5.sent[0]["magic"] == 570032
+    assert msgs[0].startswith("[M1] TRADE OPENED")
+
+
+def test_other_bots_positions_are_ignored(tmp_path):
+    mt5 = FakeMT5()
+    mt5.positions = [NS(ticket=9, identifier=9, symbol="GOLD", magic=570031, profit=0.0)]
+    msgs: list[str] = []
+    cfg = TradeConfig(enabled=True, kill_file=tmp_path / "P", state_file=tmp_path / "m1.json", magic=570032,
+                      scenarios=frozenset({Scenario.BUY_M1}))
+    t = DemoTrader(cfg, mt5, lambda s: s, lambda m: msgs.append(m) or True, now_fn=lambda: NOW)
+    t.on_signal(make_signal(scenario=Scenario.BUY_M1, dist=1.7))
+    assert len(mt5.sent) == 1  # the M15 bot's open GOLD trade does not block the M1 bot

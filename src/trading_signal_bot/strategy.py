@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
 
 import numpy as np
@@ -441,34 +441,41 @@ class StrategyEvaluator:
         bar_close_dt = bar_close.to_pydatetime()
         bar_close_price = float(m1_ctx.df.iloc[idx]["close"])
 
+        entry = price if price else bar_close_price
         if crossed_above and stoch_in_zone(m1_k, self._params.buy_zone):
-            return Signal(
-                id=Signal.new_id(),
-                symbol=symbol,
-                direction=Direction.BUY,
-                scenario=Scenario.BUY_M1,
-                price=price if price else bar_close_price,
-                created_at_utc=utc_now(),
-                m1_bar_time_utc=bar_close_dt,
-                m1_lwma_fast=m1_fast,
-                m1_lwma_slow=m1_slow,
-                m1_stoch_k=m1_k,
-                m1_stoch_d=m1_d,
+            return replace(
+                Signal(
+                    id=Signal.new_id(),
+                    symbol=symbol,
+                    direction=Direction.BUY,
+                    scenario=Scenario.BUY_M1,
+                    price=entry,
+                    created_at_utc=utc_now(),
+                    m1_bar_time_utc=bar_close_dt,
+                    m1_lwma_fast=m1_fast,
+                    m1_lwma_slow=m1_slow,
+                    m1_stoch_k=m1_k,
+                    m1_stoch_d=m1_d,
+                ),
+                **self._m1_risk_fields(m1_ctx.df, Direction.BUY, entry),
             )
 
         if crossed_below and stoch_in_zone(m1_k, self._params.sell_zone):
-            return Signal(
-                id=Signal.new_id(),
-                symbol=symbol,
-                direction=Direction.SELL,
-                scenario=Scenario.SELL_M1,
-                price=price if price else bar_close_price,
-                created_at_utc=utc_now(),
-                m1_bar_time_utc=bar_close_dt,
-                m1_lwma_fast=m1_fast,
-                m1_lwma_slow=m1_slow,
-                m1_stoch_k=m1_k,
-                m1_stoch_d=m1_d,
+            return replace(
+                Signal(
+                    id=Signal.new_id(),
+                    symbol=symbol,
+                    direction=Direction.SELL,
+                    scenario=Scenario.SELL_M1,
+                    price=entry,
+                    created_at_utc=utc_now(),
+                    m1_bar_time_utc=bar_close_dt,
+                    m1_lwma_fast=m1_fast,
+                    m1_lwma_slow=m1_slow,
+                    m1_stoch_k=m1_k,
+                    m1_stoch_d=m1_d,
+                ),
+                **self._m1_risk_fields(m1_ctx.df, Direction.SELL, entry),
             )
 
         return None
@@ -825,6 +832,20 @@ class StrategyEvaluator:
             )
             return False
         return True
+
+    def _m1_risk_fields(
+        self, m1_df: pd.DataFrame, direction: Direction, entry: float
+    ) -> dict[str, float | None]:
+        risk = self._build_risk_context(m1_df, direction, entry)
+        if risk is None:
+            return {}
+        stop, invalidation, tp1, tp2 = risk
+        return {
+            "risk_stop_distance": stop,
+            "risk_invalidation_price": invalidation,
+            "risk_tp1_price": tp1,
+            "risk_tp2_price": tp2,
+        }
 
     def _build_risk_context(
         self,

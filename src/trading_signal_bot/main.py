@@ -860,7 +860,7 @@ class TradingSignalBotApp:
 
     def build_trader(self) -> DemoTrader | None:
         cfg = load_trade_config(os.environ)
-        if not cfg.enabled:
+        if not cfg.enabled or self._dry_run:
             return None
         return DemoTrader(
             config=cfg,

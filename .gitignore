@@ -42,3 +42,6 @@ Thumbs.db
 # Generated from the website settings (see remote_settings.py)
 config/settings.effective.yaml
 config/.settings.candidate.yaml
+
+.env.m1
+data/m1/

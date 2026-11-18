@@ -43,6 +43,9 @@ class TradeConfig:
     max_per_symbol: int = 1
     kill_file: Path = Path("data/TRADING_PAUSED")
     state_file: Path = Path("data/trades.json")
+    magic: int = MAGIC  # separate per bot instance so each only sees its own trades
+    scenarios: frozenset[Scenario] = LEGACY_SCENARIOS
+    label: str = ""  # prefix for Telegram messages, e.g. "[M1]"
 
 
 def load_trade_config(env: Mapping[str, str | None]) -> TradeConfig:
@@ -69,7 +72,19 @@ def load_trade_config(env: Mapping[str, str | None]) -> TradeConfig:
         max_per_symbol=int(num("XM_TRADE_MAX_PER_SYMBOL", 1, 1, 5)),
         kill_file=Path(env.get("XM_TRADE_KILL_FILE") or "data/TRADING_PAUSED"),
         state_file=Path(env.get("XM_TRADE_STATE_FILE") or "data/trades.json"),
+        magic=int(num("XM_TRADE_MAGIC", MAGIC, 1, 2_000_000_000)),
+        scenarios=_parse_scenarios(env.get("XM_TRADE_SCENARIOS")),
+        label=(env.get("XM_BOT_LABEL") or "").strip(),
     )
+
+
+def _parse_scenarios(raw: str | None) -> frozenset[Scenario]:
+    if not raw or not raw.strip():
+        return LEGACY_SCENARIOS
+    try:
+        return frozenset(Scenario(x.strip()) for x in raw.split(",") if x.strip())
+    except ValueError as exc:
+        raise ValueError(f"XM_TRADE_SCENARIOS has an unknown scenario: {exc}") from exc
 
 
 @dataclass
@@ -99,6 +114,10 @@ class DemoTrader:
     _logger: logging.Logger = field(default_factory=lambda: logging.getLogger("DemoTrader"))
 
     def __post_init__(self) -> None:
+        raw_notify = self.notify
+        label = self.config.label
+        if label:
+            self.notify = lambda text: raw_notify(f"{label} {text}")
         self._load_state()
 
     # ------------------------------------------------------------------ public
@@ -129,7 +148,7 @@ class DemoTrader:
         if signal.symbol not in cfg.symbols:
             return "symbol is alert-only"
         scenarios = set(signal.matched_scenarios or []) | {signal.scenario}
-        if not (scenarios & LEGACY_SCENARIOS):
+        if not (scenarios & cfg.scenarios):
             return "scenario is alert-only (not backtest-proven)"
         if signal.risk_stop_distance is None or signal.risk_stop_distance <= 0:
             return "signal has no stop distance"
@@ -158,10 +177,10 @@ class DemoTrader:
         closed = sum(
             float(d.profit) + float(getattr(d, "commission", 0) or 0) + float(getattr(d, "swap", 0) or 0)
             for d in deals
-            if getattr(d, "magic", None) == MAGIC and getattr(d, "entry", None) == getattr(self.mt5, "DEAL_ENTRY_OUT", 1)
+            if getattr(d, "magic", None) == self.config.magic and getattr(d, "entry", None) == getattr(self.mt5, "DEAL_ENTRY_OUT", 1)
         )
         floating = sum(
-            float(p.profit) for p in (self.mt5.positions_get() or []) if getattr(p, "magic", None) == MAGIC
+            float(p.profit) for p in (self.mt5.positions_get() or []) if getattr(p, "magic", None) == self.config.magic
         )
         return closed + floating
 
@@ -169,7 +188,7 @@ class DemoTrader:
         return [
             p
             for p in (self.mt5.positions_get(symbol=broker_symbol) or [])
-            if getattr(p, "magic", None) == MAGIC
+            if getattr(p, "magic", None) == self.config.magic
         ]
 
     def _on_signal(self, signal: Signal) -> None:
@@ -258,8 +277,8 @@ class DemoTrader:
             "sl": sl,
             "tp": tp,
             "deviation": 30,
-            "magic": MAGIC,
-            "comment": COMMENT,
+            "magic": self.config.magic,
+            "comment": COMMENT + (self.config.label.strip("[]") if self.config.label else ""),
             "type_time": self.mt5.ORDER_TIME_GTC,
             "type_filling": self._filling(info),
         }
