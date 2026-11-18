@@ -284,6 +284,14 @@ class MT5Client:
     def _resolve_symbol(self, alias_or_symbol: str) -> str:
         return self._alias_map.get(alias_or_symbol, alias_or_symbol)
 
+    def resolve_symbol(self, alias_or_symbol: str) -> str:
+        return self._resolve_symbol(alias_or_symbol)
+
+    @property
+    def raw(self) -> Any:
+        """The underlying MetaTrader5 module (used by the demo trader)."""
+        return self._mt5
+
     def _to_mt5_timeframe(self, timeframe: Timeframe) -> int:
         if timeframe == Timeframe.M1:
             value = _to_int_or_none(getattr(self._mt5, "TIMEFRAME_M1", None))

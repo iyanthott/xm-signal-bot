@@ -39,6 +39,7 @@ from trading_signal_bot.repositories.signal_journal import SignalJournal
 from trading_signal_bot.settings import AppConfig, SecretsConfig, load_secrets, load_yaml_config
 from trading_signal_bot.strategy import M15Trigger, StrategyEvaluator
 from trading_signal_bot.telegram_notifier import TelegramNotifier
+from trading_signal_bot.trader import DemoTrader, load_trade_config
 from trading_signal_bot.web_feed import FeedSubscriber, WebSignalPublisher, load_feed_config
 from trading_signal_bot.utils import (
     atomic_write_json,
@@ -70,6 +71,8 @@ class TradingSignalBotApp:
         self._secrets = secrets
         self._dry_run = dry_run
         self._web_publisher: WebSignalPublisher | None = None
+        self._trader: DemoTrader | None = None
+        self._last_trade_poll = 0.0
         self._logger = logging.getLogger(self.__class__.__name__)
         self._last_processed_m15_close: dict[str, datetime] = {}
         self._last_processed_m1_close: dict[str, datetime] = {}
@@ -251,6 +254,7 @@ class TradingSignalBotApp:
         """Sleep in short intervals so shutdown can interrupt promptly."""
         deadline = time.monotonic() + seconds
         while time.monotonic() < deadline and not self._shutdown_requested:
+            self._poll_trades()
             remaining = deadline - time.monotonic()
             time.sleep(min(1.0, max(0, remaining)))
 
@@ -812,6 +816,8 @@ class TradingSignalBotApp:
                     )
                     continue
                 sent = self._send_with_record(signal, context=context)
+                if self._trader is not None and context != "replay":
+                    self._trader.on_signal(signal)
                 if sent and summarized:
                     for suppressed_signal in grouped_signals:
                         self._dedup.record_idempotency_only(suppressed_signal)
@@ -848,6 +854,29 @@ class TradingSignalBotApp:
             risk_tp2_price=base.risk_tp2_price,
             is_live_bar=base.is_live_bar,
         )
+
+    def set_trader(self, trader: DemoTrader | None) -> None:
+        self._trader = trader
+
+    def build_trader(self) -> DemoTrader | None:
+        cfg = load_trade_config(os.environ)
+        if not cfg.enabled:
+            return None
+        return DemoTrader(
+            config=cfg,
+            mt5=self._mt5.raw,
+            resolve_symbol=self._mt5.resolve_symbol,
+            notify=self._telegram.send_text,
+        )
+
+    def _poll_trades(self) -> None:
+        if self._trader is None:
+            return
+        now = time.monotonic()
+        if now - self._last_trade_poll < 30:
+            return
+        self._last_trade_poll = now
+        self._trader.poll_closed()
 
     def set_web_publisher(self, publisher: WebSignalPublisher | None) -> None:
         self._web_publisher = publisher
@@ -1006,6 +1035,17 @@ def main() -> None:
                 )
         try:
             app.startup()
+            trader = app.build_trader()
+            if trader is not None:
+                app.set_trader(trader)
+                logger.warning(
+                    "DEMO TRADING ENABLED symbols=%s risk=%s%%", trader.config.symbols, trader.config.risk_pct
+                )
+                app.notify_text(
+                    f"Demo auto-trading is ON for {', '.join(trader.config.symbols)} "
+                    f"(risk {trader.config.risk_pct}% per trade, TP 1:{trader.config.rr}, "
+                    f"daily loss limit {trader.config.daily_loss_pct}%)."
+                )
             app.run_forever()
         finally:
             for worker in (poller, publisher, subscriber):
