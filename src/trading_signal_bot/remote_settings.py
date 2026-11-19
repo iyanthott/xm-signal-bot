@@ -166,7 +166,7 @@ def map_to_yaml(base: dict[str, Any], remote: dict[str, Any]) -> dict[str, Any]:
         )
 
         sf = out.setdefault("session_filter", {})
-        sf.setdefault("timezone", "Asia/Phnom_Penh")  # timezone is local-only
+        sf.setdefault("timezone", "Asia/Manila")  # timezone is local-only
         sf["enabled"] = remote["sessionFilter"]["enabled"]
         sf["windows"] = [
             {"start": w["start"], "end": w["end"]} for w in remote["sessionFilter"]["windows"]

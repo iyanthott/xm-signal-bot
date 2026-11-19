@@ -359,7 +359,7 @@ def load_yaml_config(config_path: Path) -> AppConfig:
         ),
         session_filter=SessionFilterConfig(
             enabled=bool(session_filter_cfg.get("enabled", True)),
-            timezone=str(session_filter_cfg.get("timezone", "Asia/Phnom_Penh")),
+            timezone=str(session_filter_cfg.get("timezone", "Asia/Manila")),
             windows=tuple(parsed_windows),
         ),
         regime_filter=RegimeFilterConfig(

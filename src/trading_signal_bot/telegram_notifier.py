@@ -12,7 +12,7 @@ import requests
 from trading_signal_bot.models import Direction, Scenario, Signal
 from trading_signal_bot.utils import atomic_write_json, read_json, utc_now
 
-PHNOM_PENH_TZ = ZoneInfo("Asia/Phnom_Penh")
+MANILA_TZ = ZoneInfo("Asia/Manila")
 
 
 class TelegramNotifier:
@@ -240,7 +240,7 @@ class TelegramNotifier:
         }[signal.scenario]
 
         display_time = signal.m15_bar_time_utc or signal.m1_bar_time_utc
-        local_time = display_time.astimezone(PHNOM_PENH_TZ)
+        local_time = display_time.astimezone(MANILA_TZ)
         live_tag = "[LIVE] " if getattr(signal, "is_live_bar", False) else ""
         lines = [
             f"{live_tag}{signal.direction.value} {signal.symbol}",
