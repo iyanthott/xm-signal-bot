@@ -40,7 +40,7 @@ logging:
   file: logs/m1_bot.log
   max_bytes: 5242880
   backup_count: 3
-  timezone: Asia/Phnom_Penh
+  timezone: Asia/Manila
 
 telegram:
   failed_queue_file: data/m1/failed_signals.json
