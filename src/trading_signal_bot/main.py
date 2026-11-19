@@ -40,7 +40,6 @@ from trading_signal_bot.settings import AppConfig, SecretsConfig, load_secrets, 
 from trading_signal_bot.strategy import M15Trigger, StrategyEvaluator
 from trading_signal_bot.telegram_notifier import TelegramNotifier
 from trading_signal_bot.trader import DemoTrader, load_trade_config
-from trading_signal_bot.web_feed import FeedSubscriber, WebSignalPublisher, load_feed_config
 from trading_signal_bot.utils import (
     atomic_write_json,
     seconds_until_next_m1_close,
@@ -49,6 +48,7 @@ from trading_signal_bot.utils import (
     single_instance_lock,
     utc_now,
 )
+from trading_signal_bot.web_feed import FeedSubscriber, WebSignalPublisher, load_feed_config
 
 
 class TradingSignalBotApp:

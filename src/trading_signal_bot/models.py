@@ -30,6 +30,7 @@ class Scenario(str, Enum):
     SELL_CHAIN_HP = "SELL_CHAIN_HP"
     BUY_SUMMARY = "BUY_SUMMARY"
     SELL_SUMMARY = "SELL_SUMMARY"
+    BUY_DIP = "BUY_DIP"  # daily dip-buy bot (dip_bot.py)
 
 
 class TriggerMode(str, Enum):

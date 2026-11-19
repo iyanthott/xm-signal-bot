@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 from pathlib import Path
-from types import SimpleNamespace as NS
+from types import SimpleNamespace as NS  # noqa: N814
 
 import pytest
 

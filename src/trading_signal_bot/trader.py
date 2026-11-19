@@ -28,9 +28,7 @@ from trading_signal_bot.models import Direction, Scenario, Signal
 MAGIC = 570031
 COMMENT = "XMBOT"
 MANILA = ZoneInfo("Asia/Manila")
-LEGACY_SCENARIOS = frozenset(
-    {Scenario.BUY_S1, Scenario.BUY_S2, Scenario.SELL_S1, Scenario.SELL_S2}
-)
+LEGACY_SCENARIOS = frozenset({Scenario.BUY_S1, Scenario.BUY_S2, Scenario.SELL_S1, Scenario.SELL_S2})
 
 
 @dataclass(frozen=True)
@@ -64,7 +62,8 @@ def load_trade_config(env: Mapping[str, str | None]) -> TradeConfig:
     symbols_raw = env.get("XM_TRADE_SYMBOLS") or "XAUUSD,NAS100"
     symbols = tuple(s.strip() for s in symbols_raw.split(",") if s.strip())
     return TradeConfig(
-        enabled=str(env.get("XM_TRADE_ENABLED") or "").strip().lower() in {"1", "true", "yes", "on"},
+        enabled=str(env.get("XM_TRADE_ENABLED") or "").strip().lower()
+        in {"1", "true", "yes", "on"},
         symbols=symbols,
         risk_pct=num("XM_TRADE_RISK_PCT", 1.0, 0.05, 2.0),
         rr=num("XM_TRADE_RR", 1.5, 0.5, 5.0),
@@ -99,6 +98,7 @@ class _Tracked:
     risk_money: float
     opened_utc: str
     scenario: str
+    exit_reason: str = ""  # set when the bot itself closes the position (exit rule)
 
 
 @dataclass
@@ -135,6 +135,19 @@ class DemoTrader:
             self._poll_closed()
         except Exception:
             self._logger.exception("trade close polling failed")
+
+    def open_trades(self) -> list[_Tracked]:
+        """Positions this bot opened and has not yet seen close."""
+        return list(self._tracked.values())
+
+    def close_position(self, ticket: int, reason: str) -> bool:
+        """Close one of this bot's positions at market (exit rule). The close is reported by
+        poll_closed with `reason`. Returns True if the broker accepted the close. Never raises."""
+        try:
+            return self._close_position(ticket, reason)
+        except Exception:
+            self._logger.exception("closing position %s failed", ticket)
+            return False
 
     # ---------------------------------------------------------------- internals
 
@@ -175,12 +188,17 @@ class DemoTrader:
         start, end = self._day_bounds_utc()
         deals = self.mt5.history_deals_get(start, end) or []
         closed = sum(
-            float(d.profit) + float(getattr(d, "commission", 0) or 0) + float(getattr(d, "swap", 0) or 0)
+            float(d.profit)
+            + float(getattr(d, "commission", 0) or 0)
+            + float(getattr(d, "swap", 0) or 0)
             for d in deals
-            if getattr(d, "magic", None) == self.config.magic and getattr(d, "entry", None) == getattr(self.mt5, "DEAL_ENTRY_OUT", 1)
+            if getattr(d, "magic", None) == self.config.magic
+            and getattr(d, "entry", None) == getattr(self.mt5, "DEAL_ENTRY_OUT", 1)
         )
         floating = sum(
-            float(p.profit) for p in (self.mt5.positions_get() or []) if getattr(p, "magic", None) == self.config.magic
+            float(p.profit)
+            for p in (self.mt5.positions_get() or [])
+            if getattr(p, "magic", None) == self.config.magic
         )
         return closed + floating
 
@@ -194,7 +212,9 @@ class DemoTrader:
     def _on_signal(self, signal: Signal) -> None:
         reason = self._eligible(signal)
         if reason is not None:
-            self._logger.info("no trade for %s %s: %s", signal.symbol, signal.direction.value, reason)
+            self._logger.info(
+                "no trade for %s %s: %s", signal.symbol, signal.direction.value, reason
+            )
             return
         if not self._is_demo():
             self.notify("TRADE REFUSED: the connected account is not a DEMO account.")
@@ -241,9 +261,12 @@ class DemoTrader:
             return
         digits = int(info.digits)
         sl = round(entry - dist if is_buy else entry + dist, digits)
-        tp = round(
-            entry + dist * self.config.rr if is_buy else entry - dist * self.config.rr, digits
-        )
+        if self.config.rr > 0:
+            tp = round(
+                entry + dist * self.config.rr if is_buy else entry - dist * self.config.rr, digits
+            )
+        else:
+            tp = 0.0  # no take-profit: the bot exits by rule (see close_position)
 
         tick_size = float(info.trade_tick_size)
         tick_value = float(info.trade_tick_value)
@@ -286,7 +309,9 @@ class DemoTrader:
         done = getattr(self.mt5, "TRADE_RETCODE_DONE", 10009)
         if result is None or getattr(result, "retcode", None) != done:
             code = getattr(result, "retcode", None)
-            msg = getattr(result, "comment", "") if result is not None else str(self.mt5.last_error())
+            msg = (
+                getattr(result, "comment", "") if result is not None else str(self.mt5.last_error())
+            )
             self._logger.error("order rejected %s: %s %s", signal.symbol, code, msg)
             self.notify(f"TRADE FAILED {signal.symbol} {signal.direction.value}: {code} {msg}")
             return
@@ -307,12 +332,59 @@ class DemoTrader:
             scenario=signal.scenario.value,
         )
         self._save_state()
+        tp_text = f"TP {tp} (1:{self.config.rr})" if tp else "no TP (exits by rule)"
         self.notify(
             f"TRADE OPENED (DEMO) {signal.symbol} {signal.direction.value}\n"
             f"Ticket {position_ticket} | lots {volume}\n"
-            f"Entry {fill} | SL {sl} | TP {tp} (1:{self.config.rr})\n"
+            f"Entry {fill} | SL {sl} | {tp_text}\n"
             f"Risk about {risk_money:.2f} ({self.config.risk_pct}% of {balance:.2f})"
         )
+
+    def _close_position(self, ticket: int, reason: str) -> bool:
+        t = self._tracked.get(ticket)
+        if t is None:
+            self._logger.warning("close requested for untracked position %s", ticket)
+            return False
+        pos = [
+            p for p in (self.mt5.positions_get() or []) if int(getattr(p, "ticket", -1)) == ticket
+        ]
+        if not pos:
+            return False  # already closed (e.g. stop loss); poll_closed reports it
+        p = pos[0]
+        broker = str(p.symbol)
+        tick = self.mt5.symbol_info_tick(broker)
+        info = self.mt5.symbol_info(broker)
+        if tick is None or info is None:
+            self._logger.error("cannot close %s: no price data", ticket)
+            return False
+        is_buy = t.direction == Direction.BUY.value
+        request = {
+            "action": self.mt5.TRADE_ACTION_DEAL,
+            "symbol": broker,
+            "volume": float(p.volume),
+            "type": self.mt5.ORDER_TYPE_SELL if is_buy else self.mt5.ORDER_TYPE_BUY,
+            "position": ticket,
+            "price": float(tick.bid if is_buy else tick.ask),
+            "deviation": 30,
+            "magic": self.config.magic,
+            "comment": COMMENT + "exit",
+            "type_time": self.mt5.ORDER_TIME_GTC,
+            "type_filling": self._filling(info),
+        }
+        result = self.mt5.order_send(request)
+        if result is None or getattr(result, "retcode", None) != getattr(
+            self.mt5, "TRADE_RETCODE_DONE", 10009
+        ):
+            code = getattr(result, "retcode", None)
+            msg = (
+                getattr(result, "comment", "") if result is not None else str(self.mt5.last_error())
+            )
+            self._logger.error("close rejected %s: %s %s", ticket, code, msg)
+            self.notify(f"CLOSE FAILED {t.symbol} ticket {ticket}: {code} {msg}. Will retry.")
+            return False
+        t.exit_reason = reason
+        self._save_state()
+        return True
 
     def _filling(self, info: Any) -> int:
         mode = int(getattr(info, "filling_mode", 0) or 0)
@@ -324,7 +396,10 @@ class DemoTrader:
 
     def _position_ticket(self, broker: str, order_ticket: int) -> int:
         for p in self._open_positions(broker):
-            if getattr(p, "ticket", None) == order_ticket or getattr(p, "identifier", None) == order_ticket:
+            if (
+                getattr(p, "ticket", None) == order_ticket
+                or getattr(p, "identifier", None) == order_ticket
+            ):
                 return int(p.ticket)
         positions = self._open_positions(broker)
         return int(positions[-1].ticket) if positions else order_ticket
@@ -338,13 +413,19 @@ class DemoTrader:
             if ticket in open_tickets:
                 continue
             deals = self.mt5.history_deals_get(position=ticket) or []
-            out = [d for d in deals if getattr(d, "entry", None) == getattr(self.mt5, "DEAL_ENTRY_OUT", 1)]
+            out = [
+                d
+                for d in deals
+                if getattr(d, "entry", None) == getattr(self.mt5, "DEAL_ENTRY_OUT", 1)
+            ]
             if not out:
                 continue  # history not visible yet; try again next poll
             t = self._tracked.pop(ticket)
             changed = True
             profit = sum(
-                float(d.profit) + float(getattr(d, "commission", 0) or 0) + float(getattr(d, "swap", 0) or 0)
+                float(d.profit)
+                + float(getattr(d, "commission", 0) or 0)
+                + float(getattr(d, "swap", 0) or 0)
                 for d in deals
             )
             exit_price = float(out[-1].price)
@@ -361,9 +442,10 @@ class DemoTrader:
 
     @staticmethod
     def _close_reason(t: _Tracked, exit_price: float) -> str:
-        span = abs(t.tp - t.entry)
-        tol = max(span * 0.1, 1e-9)
-        if abs(exit_price - t.tp) <= tol:
+        if t.exit_reason:
+            return t.exit_reason
+        tol = max(abs(t.entry - t.sl) * 0.1, 1e-9)
+        if t.tp and abs(exit_price - t.tp) <= max(abs(t.tp - t.entry) * 0.1, 1e-9):
             return "take profit"
         if abs(exit_price - t.sl) <= tol:
             return "stop loss"
