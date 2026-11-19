@@ -31,6 +31,7 @@ class Scenario(str, Enum):
     BUY_SUMMARY = "BUY_SUMMARY"
     SELL_SUMMARY = "SELL_SUMMARY"
     BUY_DIP = "BUY_DIP"  # daily dip-buy bot (dip_bot.py)
+    TREND_BREAKOUT = "TREND_BREAKOUT"  # daily crypto trend bot (trend_bot.py)
 
 
 class TriggerMode(str, Enum):
