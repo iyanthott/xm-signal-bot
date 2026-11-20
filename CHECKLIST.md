@@ -1,6 +1,6 @@
 # CHECKLIST.md — trading-signal-bot ("Poging Kita" bots)
 Living record per CLAUDE.md §7. Updated the same session work ships.
-Last updated: 2026-11-19 (4 bots running on DEMO 318967331; bot 4 just built; log timezone fixed)
+Last updated: 2026-11-20 (6 bots running on DEMO 318967331; bots 5 and 6 built and launched; GBPUSD added to bot 3)
 
 ### Plan & phases
 - [ ] No single governing `*_PLAN.md` for this repo — built bot-by-bot by direct approval each session
@@ -10,18 +10,49 @@ Last updated: 2026-11-19 (4 bots running on DEMO 318967331; bot 4 just built; lo
 ### Development
 - [x] Bot 1 — M15 strategy bot (magic 570031), legacy S1/S2 scenarios, `scripts/run_supervised.ps1`
 - [x] Bot 2 — M1 bot (magic 570032), `[M1]` label, `scripts/run_m1_bot.ps1` + `.env.m1`
-- [x] Bot 3 — Daily Dip (magic 570033), `[DIP]`, US500+NAS100, `scripts/run_dip_bot.ps1` (2026-11-19)
+- [x] Bot 3 — Daily Dip (magic 570033), `[DIP]`, US500+NAS100+GBPUSD, `scripts/run_dip_bot.ps1` (2026-11-19;
+      GBPUSD added 2026-11-20 - same already-tested dip_long rule, test_PF 1.82 on 80 held-out trades, zero
+      new code, config-only change)
 - [x] Bot 4 — Crypto Trend (magic 570034), `[TREND]`, BTC+ETH Donchian 55/20 breakout, `scripts/run_trend_bot.ps1` (2026-11-19)
+- [x] Bot 5 — Volatility Breakout (magic 570035), `[VBO]`, ETH intraday stop-order breakout (open +/- 0.5x prior
+      range), 5-day time stop, `scripts/run_vbo_bot.ps1` (2026-11-20). Built from the "learn from performing
+      traders" research (Williams volatility breakout), stress-tested for robustness across k and time before
+      building. 7 new unit tests, all green (192 total). No BTC — BTCUSD did not pass the backtest filter.
+- [x] Bot 6 — Candle Breakout (magic 570036), `[CBO]`, GOLD 55-day breakout gated on a strong-bodied candle,
+      `scripts/run_cbo_bot.ps1` (2026-11-20). Reuses Bot 4's exit rule directly (imported from trend_bot.py,
+      not duplicated). Backtest: GOLD test_PF 2.55, 22 held-out trades. 8 new unit tests incl. live-vs-backtest
+      formula parity, all green (200 total).
 - [x] `research/strategy_lab.py` + `research/daily_lab.py` — reusable backtest tooling, ~140-market universe
       research behind bots 3 and 4 (committed 2026-11-19)
 - [ ] No placeholders / stub code remaining — true for bots 1-4; M1 backtest validation never finished (noted gap)
+- [~] Candlestick-pattern research (2026-11-20): added `engulf_pullback` and `breakout_candle` strategies to
+      `daily_lab.py`, ran full universe. Standalone engulfing pattern + trend/RSI context = no edge (fails pass
+      filter everywhere). Strong-body candle as a *filter* on the existing breakout entry improves held-out test
+      PF/winrate/drawdown on BTCUSD and ETHUSD specifically (Bot 4's own markets), but test_n is only 13/7 trades —
+      below the 15-trade bar `daily_lab.py` itself requires to call a result real. Not wired into the live Bot 4;
+      revisit once more data exists. No live code changed.
+- [~] "Learn from performing traders" research (2026-11-20): added `holy_grail` (Raschke/Connors ADX-pullback)
+      and `vol_breakout` (Williams-style open +/- 0.5x prior-range stop) to `daily_lab.py`, ran full universe.
+      `holy_grail`: no edge, negative pooled expectancy in every asset class, zero markets pass - matches the
+      research caveat that a high ADX reading describes strength already spent, not what comes next.
+      `vol_breakout`: real edge, NOT universal - passes on BRENTCash, OILCash, and ETHUSD with solid sample
+      sizes (test_n 115-200, well above the 15-trade bar), but pooled expectancy is flat-to-negative on fx/
+      index/metal and value-destroying on stocks (avg_expR -0.207). ETHUSD is the actionable one - a market
+      we already trade (Bot 4), but a different cadence (5-day max hold, ~48 trades/yr vs Bot 4's ~4/yr), so
+      it would be a new/separate bot, not a Bot 4 tweak. Not built yet - awaiting go-ahead. No live code changed.
+      Stress-tested 2026-11-20: ETHUSD holds up across k=0.3-1.0 (PF 1.18-1.41 throughout, never flips) and
+      across all 4 sequential time-windows since 2017 (never negative, PF 1.06-1.56) - genuinely robust, not a
+      lucky parameter pick. BRENTCash/OILCash downgraded on the same test: both flip to losing (PF<1) at
+      higher k (Brent k>=0.8, Oil k>=0.6) and Brent had one clearly losing multi-year window (2020-07..2022-08,
+      PF 0.68) - fragile, and moot anyway since no live bot trades energy. ETHUSD is the only candidate worth
+      building on.
 
 ### QA
-- [x] Functional tests passed: 181 unit tests (trader, dip_bot, trend_bot, strategy, settings, etc.), all green
+- [x] Functional tests passed: 200 unit tests (trader, dip_bot, trend_bot, vbo_bot, cbo_bot, strategy, settings, etc.), all green
 - [x] Edge cases tested per bot: demo-account refusal, kill-file pause, daily-loss limit, one-position-per-symbol,
       time stops, exit-rule parity with backtest, late-entry skip, reversal (bot 4)
 - [~] Performance / capacity — N/A in the traditional sense (no concurrent users); capacity = MT5 polling every
-      30s per bot, four processes on one PC. Not measured under load; low risk at this scale.
+      15-30s per bot, six processes on one PC. Not measured under load; low risk at this scale.
 - [ ] Mobile / cross-browser / accessibility — N/A, no UI in this repo (settings UI lives in `xm-web`)
 - [x] Trade-lifecycle messages verified: Telegram SIGNAL / TRADE OPENED / TRADE CLOSED (with reason) / CLOSE FAILED
 - [~] Professional build audit — informal only, done inline per bot as built; no standalone audit doc written
@@ -52,8 +83,8 @@ Last updated: 2026-11-19 (4 bots running on DEMO 318967331; bot 4 just built; lo
 - [x] External dependency failure modes identified: MT5 terminal closed (bot can't trade), Telegram API down
       (queued to `failed_messages.json`, retried), broker market closed (`SYMBOL_TRADE_MODE_FULL` check skips)
 - [ ] Production monitoring/alerting beyond the heartbeat log line — none; Adrian checks manually on request
-- [ ] Crypto (bot 4) trades weekends; the PC/MT5 must stay on through Sat/Sun or signals are missed (known gap,
-      not yet solved — VPS move would fix it)
+- [ ] Crypto (bots 4 and 5) trades weekends; the PC/MT5 must stay on through Sat/Sun or signals are missed
+      (known gap, not yet solved — VPS move would fix it)
 
 ### Business logic & edge cases
 - [x] One position per symbol per bot (own magic number keeps bots from colliding on the same symbol)

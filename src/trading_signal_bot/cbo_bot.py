@@ -1,0 +1,338 @@
+"""Bot 6 - Candle Breakout: the plain 55-day breakout (same as Bot 4), gated on the trigger bar
+being a strong-bodied candle, traded on GOLD.
+
+Rules (exactly what research/daily_lab.py `breakout_candle` backtested on GOLD, net of spread and swap):
+  entry : daily close above the previous 55-day high, where that day's candle has a body >= 60% of
+          its range and closes in the outer (top) quartile of the range -> buy at the next day's open
+          mirror for a close below the 55-day low (bottom quartile close) -> sell
+  stop  : 2 x ATR(14) of the daily bars (broker-side stop loss)
+  exit  : long  - first daily close below the previous 20-day low  -> close at the next open
+          short - first daily close above the previous 20-day high -> close at the next open
+          or after 120 daily bars in the trade (time stop) - identical exit rule to Bot 4 (trend_bot.py)
+  one position per market; GOLD does not trade weekends
+
+Backtest (GOLD, 2001-2026): 83 trades, 30.1% win, PF 1.58, +0.367R/trade; held-out test slice PF 2.55,
+22 trades, +0.899R/trade. The candle filter is what makes GOLD pass where the plain `breakout` (no
+candle filter) does not.
+Past results do not guarantee future results; this runs on the DEMO account only (DemoTrader enforces it).
+
+    poetry run python -m trading_signal_bot.cbo_bot             (reads .env; see .env.example XM_CBO_*)
+Pause trading instantly: create data/cbo/TRADING_PAUSED
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import logging
+import os
+import signal as os_signal
+import time
+from collections.abc import Callable, Mapping
+from dataclasses import dataclass, field
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any
+
+import numpy as np
+import pandas as pd
+
+from trading_signal_bot.dip_bot import _atr
+from trading_signal_bot.models import Direction, Scenario, Signal
+from trading_signal_bot.trader import DemoTrader, TradeConfig
+from trading_signal_bot.trend_bot import _channels, exit_signal
+
+CBO_MAGIC = 570036
+LOG = logging.getLogger("CboBot")
+
+
+# ---------------------------------------------------------------- config
+@dataclass(frozen=True)
+class CboConfig:
+    markets: dict[str, str] = field(default_factory=lambda: {"GOLD": "GOLD"})
+    entry_days: int = 55
+    exit_days: int = 20
+    stop_atr: float = 2.0
+    max_days: int = 120
+    entry_window_hours: float = 4.0  # only enter if the new day's bar is younger than this
+    state_file: Path = Path("data/cbo/cbo_state.json")
+
+
+def _flag(raw: str | None) -> bool:
+    return str(raw or "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def load_cbo_config(env: Mapping[str, str | None]) -> tuple[CboConfig, TradeConfig]:
+    def num(name: str, default: float, lo: float, hi: float) -> float:
+        raw = env.get(name)
+        if raw in (None, ""):
+            return default
+        try:
+            value = float(str(raw))
+        except ValueError as exc:
+            raise ValueError(f"{name} must be a number") from exc
+        if not (lo <= value <= hi):
+            raise ValueError(f"{name} must be between {lo} and {hi}")
+        return value
+
+    markets: dict[str, str] = {}
+    for part in (env.get("XM_CBO_MARKETS") or "GOLD=GOLD").split(","):
+        label, _, broker = part.strip().partition("=")
+        if label.strip():
+            markets[label.strip()] = (broker or label).strip()
+    entry_days = int(num("XM_CBO_ENTRY_DAYS", 55, 10, 200))
+    exit_days = int(num("XM_CBO_EXIT_DAYS", 20, 5, 100))
+    if exit_days >= entry_days:
+        raise ValueError("XM_CBO_EXIT_DAYS must be shorter than XM_CBO_ENTRY_DAYS")
+    cbo = CboConfig(
+        markets=markets,
+        entry_days=entry_days,
+        exit_days=exit_days,
+        stop_atr=num("XM_CBO_STOP_ATR", 2.0, 0.5, 6.0),
+        max_days=int(num("XM_CBO_MAX_DAYS", 120, 5, 365)),
+    )
+    trade = TradeConfig(
+        enabled=_flag(env.get("XM_CBO_ENABLED")),
+        symbols=tuple(markets),
+        risk_pct=num("XM_CBO_RISK_PCT", 0.5, 0.05, 2.0),
+        rr=0.0,  # no take-profit; exits by rule
+        daily_loss_pct=num("XM_CBO_DAILY_LOSS_PCT", 2.0, 0.5, 10.0),
+        kill_file=Path(env.get("XM_CBO_KILL_FILE") or "data/cbo/TRADING_PAUSED"),
+        state_file=Path(env.get("XM_CBO_STATE_FILE") or "data/cbo/trades.json"),
+        magic=int(num("XM_CBO_MAGIC", CBO_MAGIC, 1, 2_000_000_000)),
+        scenarios=frozenset({Scenario.BREAKOUT_CANDLE}),
+        label="[CBO]",
+    )
+    return cbo, trade
+
+
+# ---------------------------------------------------------------- rules (same formulas as the backtest)
+def _strong_body(daily: pd.DataFrame) -> tuple[np.ndarray, np.ndarray]:
+    """body >= 60% of the day's range; close in the outer quartile -> (strong bullish, strong bearish)."""
+    o, h, lo, c = daily.open, daily.high, daily.low, daily.close
+    rng = (h - lo).replace(0, np.nan)
+    body_ok = (c - o).abs() / rng >= 0.6
+    bull = body_ok & (c > o) & ((c - lo) / rng >= 0.75)
+    bear = body_ok & (c < o) & ((h - c) / rng >= 0.75)
+    return bull.fillna(False).to_numpy(), bear.fillna(False).to_numpy()
+
+
+def breakout_candle_signal(daily: pd.DataFrame, entry_days: int = 55, exit_days: int = 20) -> np.ndarray:
+    """+1 (buy) / -1 (sell) / 0 on each closed daily bar: plain breakout gated on a strong-bodied candle."""
+    ch = _channels(daily, entry_days, exit_days)
+    c = daily.close
+    bull, bear = _strong_body(daily)
+    up = (c > ch["hi_entry"]).to_numpy() & bull
+    dn = (c < ch["lo_entry"]).to_numpy() & bear
+    return np.where(up, 1, np.where(dn, -1, 0))
+
+
+# ---------------------------------------------------------------- bot
+@dataclass
+class CboBot:
+    config: CboConfig
+    trader: DemoTrader
+    mt5: Any
+    notify: Callable[[str], bool]
+    _state: dict[str, Any] = field(default_factory=dict)
+    _last_tick: dict[str, int] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        try:
+            self._state = json.loads(self.config.state_file.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            self._state = {}
+        self._state.setdefault("last_bar", {})  # label -> last closed daily bar processed
+        self._state.setdefault("entry_bar", {})  # ticket -> daily bar the trade was entered on
+
+    def step(self) -> None:
+        self.trader.poll_closed()
+        for label, broker in self.config.markets.items():
+            try:
+                self._step_market(label, broker)
+            except Exception:
+                LOG.exception("cbo step failed for %s", label)
+
+    def _daily(self, broker: str) -> pd.DataFrame | None:
+        self.mt5.symbol_select(broker, True)
+        need = self.config.entry_days + 40
+        rates = self.mt5.copy_rates_from_pos(broker, self.mt5.TIMEFRAME_D1, 0, need + 60)
+        if rates is None or len(rates) < need:
+            return None
+        df = pd.DataFrame(rates)[["time", "open", "high", "low", "close"]]
+        df["time"] = pd.to_datetime(df["time"], unit="s")  # server time
+        weekdays: pd.DataFrame = df[df.time.dt.dayofweek < 5].reset_index(drop=True)
+        return weekdays
+
+    def _step_market(self, label: str, broker: str) -> None:
+        df = self._daily(broker)
+        tick = self.mt5.symbol_info_tick(broker)
+        if df is None or tick is None:
+            return
+        forming, closed = df.iloc[-1], df.iloc[:-1].reset_index(drop=True)
+        server_now = pd.to_datetime(int(tick.time), unit="s")
+        prev_tick = self._last_tick.get(label)
+        self._last_tick[label] = int(tick.time)
+        if prev_tick is None or int(tick.time) <= prev_tick or server_now < forming.time:
+            return  # act only on a live, moving quote
+        last_closed = str(closed.time.iloc[-1])
+        if self._state["last_bar"].get(label) == last_closed:
+            return
+        cfg = self.config
+
+        # --- exits first (rule evaluated on the bar that just closed; we are at the next open)
+        closed_any = False
+        for t in [t for t in self.trader.open_trades() if t.symbol == label]:
+            entry_bar = self._state["entry_bar"].get(str(t.ticket))
+            bars_in_trade = int((closed.time >= pd.Timestamp(entry_bar)).sum()) if entry_bar else 0
+            reason = None
+            if exit_signal(closed, Direction(t.direction), cfg.entry_days, cfg.exit_days):
+                side = "low" if t.direction == Direction.BUY.value else "high"
+                reason = f"exit rule: closed through the {cfg.exit_days}-day {side}"
+            elif bars_in_trade >= cfg.max_days:
+                reason = f"time stop: {bars_in_trade} days in the trade"
+            if reason:
+                if not self.trader.close_position(t.ticket, reason):
+                    return  # retry next pass; do not mark the bar as processed
+                closed_any = True
+        if closed_any:
+            self.trader.poll_closed()
+
+        # --- entry
+        sig = int(breakout_candle_signal(closed, cfg.entry_days, cfg.exit_days)[-1])
+        if sig and not any(t.symbol == label for t in self.trader.open_trades()):
+            bar_age_h = (server_now - forming.time).total_seconds() / 3600
+            if bar_age_h <= cfg.entry_window_hours:
+                self._enter(label, closed, tick, sig, forming.time)
+            else:
+                LOG.info(
+                    "candle-breakout signal on %s but the day started %.1fh ago; skipping late entry",
+                    label,
+                    bar_age_h,
+                )
+
+        self._state["last_bar"][label] = last_closed
+        self._save()
+
+    def _enter(
+        self, label: str, closed: pd.DataFrame, tick: Any, sig: int, entry_bar_time: pd.Timestamp
+    ) -> None:
+        cfg = self.config
+        direction = Direction.BUY if sig > 0 else Direction.SELL
+        ch = _channels(closed, cfg.entry_days, cfg.exit_days)
+        dist = cfg.stop_atr * float(_atr(closed).iloc[-1])
+        close = float(closed.close.iloc[-1])
+        if direction is Direction.BUY:
+            why = f"close {close:.2f} above the {cfg.entry_days}-day high {float(ch['hi_entry'].iloc[-1]):.2f}, strong bullish candle"
+            exit_txt = f"first close below the {cfg.exit_days}-day low"
+        else:
+            why = f"close {close:.2f} below the {cfg.entry_days}-day low {float(ch['lo_entry'].iloc[-1]):.2f}, strong bearish candle"
+            exit_txt = f"first close above the {cfg.exit_days}-day high"
+        now = datetime.now(timezone.utc)
+        self.notify(
+            f"[CBO] SIGNAL {label} {direction.value} (candle-confirmed breakout)\n"
+            f"{why}\n"
+            f"Plan: stop {cfg.stop_atr:g}x daily ATR ({dist:.2f}); exit on {exit_txt} "
+            f"or after {cfg.max_days} days."
+        )
+        before = {t.ticket for t in self.trader.open_trades()}
+        self.trader.on_signal(
+            Signal(
+                id=Signal.new_id(),
+                symbol=label,
+                direction=direction,
+                scenario=Scenario.BREAKOUT_CANDLE,
+                price=float(tick.ask if direction is Direction.BUY else tick.bid),
+                created_at_utc=now,
+                m1_bar_time_utc=now,
+                risk_stop_distance=dist,
+            )
+        )
+        for t in self.trader.open_trades():
+            if t.ticket not in before:
+                self._state["entry_bar"][str(t.ticket)] = str(entry_bar_time)
+
+    def _save(self) -> None:
+        live = {str(t.ticket) for t in self.trader.open_trades()}
+        self._state["entry_bar"] = {k: v for k, v in self._state["entry_bar"].items() if k in live}
+        try:
+            self.config.state_file.parent.mkdir(parents=True, exist_ok=True)
+            self.config.state_file.write_text(json.dumps(self._state, indent=1), encoding="utf-8")
+        except OSError:
+            LOG.exception("could not save cbo state")
+
+
+# ---------------------------------------------------------------- process entry point
+def main() -> None:
+    from trading_signal_bot.mt5_client import _load_mt5_module
+    from trading_signal_bot.settings import load_secrets
+    from trading_signal_bot.telegram_notifier import TelegramNotifier
+    from trading_signal_bot.utils import setup_logging, single_instance_lock
+
+    ap = argparse.ArgumentParser(description="Bot 6 - Candle Breakout (demo only)")
+    ap.add_argument("--env", type=Path, default=Path(".env"))
+    ap.add_argument("--lock-file", type=Path, default=Path("data/cbo/bot.lock"))
+    ap.add_argument("--poll-seconds", type=float, default=30.0)
+    args = ap.parse_args()
+
+    secrets = load_secrets(args.env)
+    setup_logging("INFO", Path("logs/cbo_bot.log"), 5_000_000, 5, timezone="Asia/Manila")
+    cbo_cfg, trade_cfg = load_cbo_config(os.environ)
+
+    mt5 = _load_mt5_module()
+    if mt5 is None:
+        raise SystemExit("MetaTrader5 package is unavailable in this environment")
+
+    def connect() -> bool:
+        return bool(
+            mt5.initialize(path=secrets.mt5_terminal_path)
+            if secrets.mt5_terminal_path
+            else mt5.initialize()
+        )
+
+    if not connect():
+        raise SystemExit(f"MT5 initialize failed: {mt5.last_error()}")
+    acct = mt5.account_info()
+    if acct is None or int(acct.login) != secrets.mt5_login:
+        raise SystemExit("MT5 terminal is not logged into the account in .env; refusing to start")
+
+    tg = TelegramNotifier(
+        token=secrets.telegram_bot_token,
+        chat_id=secrets.telegram_chat_id,
+        failed_queue_file=Path("data/cbo/failed_messages.json"),
+    )
+    trader = DemoTrader(trade_cfg, mt5, lambda s: cbo_cfg.markets.get(s, s), tg.send_text)
+    bot = CboBot(cbo_cfg, trader, mt5, tg.send_text)
+
+    stop = {"flag": False}
+    os_signal.signal(os_signal.SIGINT, lambda *_: stop.update(flag=True))
+    with single_instance_lock(args.lock_file):
+        LOG.warning(
+            "CBO BOT started trading=%s markets=%s risk=%s%% entry=%s exit=%s stop=%sxATR max_days=%s",
+            trade_cfg.enabled,
+            cbo_cfg.markets,
+            trade_cfg.risk_pct,
+            cbo_cfg.entry_days,
+            cbo_cfg.exit_days,
+            cbo_cfg.stop_atr,
+            cbo_cfg.max_days,
+        )
+        tg.send_text(
+            f"[CBO] Candle Breakout bot started on {', '.join(cbo_cfg.markets)} "
+            f"(demo trading {'ON' if trade_cfg.enabled else 'OFF'}, risk {trade_cfg.risk_pct}% per trade). "
+            "55-day breakout gated on a strong-bodied candle; expect about 3 trades a year."
+        )
+        last_beat = 0.0
+        while not stop["flag"]:
+            if mt5.terminal_info() is None:
+                LOG.error("MT5 connection lost; reconnecting")
+                connect()
+            bot.step()
+            if time.time() - last_beat > 3600:
+                LOG.info("heartbeat ok open_trades=%d", len(trader.open_trades()))
+                last_beat = time.time()
+            time.sleep(args.poll_seconds)
+
+
+if __name__ == "__main__":
+    main()

@@ -1,11 +1,23 @@
 """Daily-timeframe research across the whole XM universe (indices, metals, energy, FX, crypto, ETFs, US stocks).
 
 Fixed rules, identical for every market (no per-market tuning, so a "pass" is not curve-fitting):
-  dip_long     : close > SMA200 and RSI(2) < 15 -> buy next open; exit next open after a close > SMA5
-                 or after 10 days; stop 2 x ATR14
-  rally_short  : mirror image: close < SMA200 and RSI(2) > 85 -> sell; exit after a close < SMA5 / 10 days
-  breakout     : close above the 55-day high -> buy (below the 55-day low -> sell); exit next open after
-                 a close beyond the opposite 20-day channel; stop 2 x ATR14; max 120 days
+  dip_long       : close > SMA200 and RSI(2) < 15 -> buy next open; exit next open after a close > SMA5
+                   or after 10 days; stop 2 x ATR14
+  rally_short    : mirror image: close < SMA200 and RSI(2) > 85 -> sell; exit after a close < SMA5 / 10 days
+  breakout       : close above the 55-day high -> buy (below the 55-day low -> sell); exit next open after
+                   a close beyond the opposite 20-day channel; stop 2 x ATR14; max 120 days
+  engulf_pullback: close > SMA200 and RSI(14) < 40 and today is a bullish engulfing candle -> buy
+                   (mirror: close < SMA200, RSI(14) > 60, bearish engulfing -> sell); same exit as dip_long
+  breakout_candle: breakout entry (above) gated on the trigger bar being a strong-bodied candle (body
+                   >= 60% of the day's range, closing in the outer quartile) -> tests whether candle
+                   shape on the breakout bar improves on plain `breakout`; same exit as breakout
+  holy_grail     : Linda Raschke/Laurence Connors setup. ADX(14) > 30 and rising (established, strengthening
+                   trend) + price pulls back to touch the 20-day SMA in the trend direction -> enter next
+                   open; exit on a close back through the 20-day SMA or after 15 days; stop 2 x ATR14
+  vol_breakout   : Larry Williams-style volatility breakout. Buy stop at today's open + 0.5 x yesterday's
+                   range, sell stop at open - 0.5 x range; fills at the stop level itself (not the open) if
+                   touched intraday, skipped if both levels are touched the same day; stop 2 x ATR14; exit
+                   at the close after 5 days if neither stop is hit
 Costs: 1.5x spread (max of live and recent bar median) and the broker's actual swap for that direction
 (charges only; swap credits are ignored), both scaled to the price at the time.
 
@@ -116,9 +128,40 @@ def _swap_frac(info: object, swap: float, price: float) -> float:
 
 
 # ---------------------------------------------------------------- strategies -> entries and exit rules
+def _bullish_engulf(o: pd.Series, c: pd.Series) -> pd.Series:
+    po, pc = o.shift(), c.shift()
+    return (c > o) & (pc < po) & (o <= pc) & (c >= po) & ((c - o) >= (po - pc))
+
+
+def _bearish_engulf(o: pd.Series, c: pd.Series) -> pd.Series:
+    po, pc = o.shift(), c.shift()
+    return (c < o) & (pc > po) & (o >= pc) & (c <= po) & ((o - c) >= (pc - po))
+
+
+def _strong_body(o: pd.Series, h: pd.Series, lo: pd.Series, c: pd.Series) -> tuple[pd.Series, pd.Series]:
+    """body >= 60% of the day's range; close in the outer quartile -> (strong bullish, strong bearish)."""
+    rng = (h - lo).replace(0, np.nan)
+    body_ok = (c - o).abs() / rng >= 0.6
+    bull = body_ok & (c > o) & ((c - lo) / rng >= 0.75)
+    bear = body_ok & (c < o) & ((h - c) / rng >= 0.75)
+    return bull.fillna(False), bear.fillna(False)
+
+
+def _adx_di(df: pd.DataFrame, n: int = 14) -> tuple[pd.Series, pd.Series, pd.Series]:
+    """Wilder's ADX plus its +DI/-DI components (same smoothing as strategy_lab.adx, direction exposed)."""
+    up, dn = df.high.diff(), -df.low.diff()
+    pdm = np.where((up > dn) & (up > 0), up, 0.0)
+    mdm = np.where((dn > up) & (dn > 0), dn, 0.0)
+    a = atr(df, n)
+    pdi = 100 * pd.Series(pdm, index=df.index).ewm(alpha=1 / n, adjust=False).mean() / a
+    mdi = 100 * pd.Series(mdm, index=df.index).ewm(alpha=1 / n, adjust=False).mean() / a
+    dx = 100 * (pdi - mdi).abs() / (pdi + mdi).replace(0, np.nan)
+    return dx.ewm(alpha=1 / n, adjust=False).mean(), pdi, mdi
+
+
 def signals(df: pd.DataFrame, strat: str) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """Returns (entry direction per bar, exit-long flag per bar, exit-short flag per bar), evaluated at the close."""
-    c = df.close
+    o, h, lo, c = df.open, df.high, df.low, df.close
     if strat in ("dip_long", "rally_short"):
         sma200, sma5, r2 = c.rolling(200).mean(), c.rolling(5).mean(), rsi(c, 2)
         if strat == "dip_long":
@@ -126,16 +169,89 @@ def signals(df: pd.DataFrame, strat: str) -> tuple[np.ndarray, np.ndarray, np.nd
         else:
             entry = np.where((c < sma200) & (r2 > 85), -1, 0)
         return entry, (c > sma5).to_numpy(), (c < sma5).to_numpy()
-    hi55, lo55 = df.high.rolling(55).max().shift(), df.low.rolling(55).min().shift()
-    hi20, lo20 = df.high.rolling(20).max().shift(), df.low.rolling(20).min().shift()
-    entry = np.where(c > hi55, 1, np.where(c < lo55, -1, 0))
+    if strat == "engulf_pullback":
+        sma200, sma5, r14 = c.rolling(200).mean(), c.rolling(5).mean(), rsi(c, 14)
+        up = (c > sma200) & (r14 < 40) & _bullish_engulf(o, c)
+        dn = (c < sma200) & (r14 > 60) & _bearish_engulf(o, c)
+        entry = np.where(up, 1, np.where(dn, -1, 0))
+        return entry, (c > sma5).to_numpy(), (c < sma5).to_numpy()
+    if strat == "holy_grail":
+        adx_, pdi, mdi = _adx_di(df, 14)
+        sma20 = c.rolling(20).mean()
+        rising = adx_ > adx_.shift(1)
+        strong_up = (adx_ > 30) & rising & (pdi > mdi)
+        strong_dn = (adx_ > 30) & rising & (mdi > pdi)
+        up = strong_up & (lo <= sma20) & (c > sma20)
+        dn = strong_dn & (h >= sma20) & (c < sma20)
+        entry = np.where(up, 1, np.where(dn, -1, 0))
+        return entry, (c < sma20).to_numpy(), (c > sma20).to_numpy()
+    hi55, lo55 = h.rolling(55).max().shift(), lo.rolling(55).min().shift()
+    hi20, lo20 = h.rolling(20).max().shift(), lo.rolling(20).min().shift()
+    if strat == "breakout_candle":
+        bull, bear = _strong_body(o, h, lo, c)
+        entry = np.where((c > hi55) & bull, 1, np.where((c < lo55) & bear, -1, 0))
+    else:
+        entry = np.where(c > hi55, 1, np.where(c < lo55, -1, 0))
     return entry, (c < lo20).to_numpy(), (c > hi20).to_numpy()
 
 
-MAX_DAYS = {"dip_long": 10, "rally_short": 10, "breakout": 120}
+MAX_DAYS = {
+    "dip_long": 10, "rally_short": 10, "breakout": 120, "engulf_pullback": 10,
+    "breakout_candle": 120, "holy_grail": 15, "vol_breakout": 5,
+}
+
+
+# ---------------------------------------------------------------- Williams-style volatility breakout
+def simulate_vbo(df: pd.DataFrame, meta: dict, k: float = 0.5, sl_atr: float = 2.0, max_days: int = 5) -> Result:
+    """Buy stop at today's open + k x yesterday's range, sell stop at open - k x range (Larry Williams'
+    volatility breakout, no ATR in the trigger - only in the stop). Both levels known at today's open,
+    so this is not look-ahead; fill is at the breakout level itself (stop-order fill), not at the open.
+    If both levels are touched the same day the bar is ambiguous (no intrabar order) and skipped."""
+    o, h, lo, c = (df[k_].to_numpy() for k_ in ("open", "high", "low", "close"))
+    t = df.time.to_numpy()
+    a = atr(df, 14).to_numpy()
+    rng_prev = (df.high - df.low).shift().to_numpy()
+    spread_now = meta["spread_frac"]
+    out_r, out_t = [], []
+    i, n = 200, len(df) - 1
+    while i < n:
+        if not np.isfinite(a[i]) or a[i] <= 0 or not np.isfinite(rng_prev[i]) or rng_prev[i] <= 0:
+            i += 1
+            continue
+        level_up, level_dn = o[i] + k * rng_prev[i], o[i] - k * rng_prev[i]
+        hit_up, hit_dn = h[i] >= level_up, lo[i] <= level_dn
+        if hit_up == hit_dn:  # neither or both (ambiguous) -> skip
+            i += 1
+            continue
+        d = 1 if hit_up else -1
+        raw_entry = level_up if d == 1 else level_dn
+        entry = raw_entry + spread_now * raw_entry * d
+        dist = sl_atr * a[i]
+        stop = entry - dist if d == 1 else entry + dist
+        j, exit_px = i, None
+        while j <= min(n, i + max_days):
+            if d == 1 and lo[j] <= stop:
+                exit_px = stop if j == i else min(stop, o[j])
+                break
+            if d == -1 and h[j] >= stop:
+                exit_px = stop if j == i else max(stop, o[j])
+                break
+            if j == min(n, i + max_days):
+                exit_px = c[j]
+                break
+            j += 1
+        nights = int((t[j] - t[i]) / np.timedelta64(1, "D"))
+        swap = (meta["swap_long_frac"] if d == 1 else meta["swap_short_frac"]) * entry * max(nights, 0)
+        pnl = (exit_px - entry) * d - swap
+        out_r.append(pnl / dist)
+        out_t.append(i)
+        i = j + 1
+    return Result(np.array(out_r), np.array(out_t))
 
 
 def simulate(df: pd.DataFrame, strat: str, meta: dict) -> Result:
+    if strat == "vol_breakout":
+        return simulate_vbo(df, meta)
     entry, exit_l, exit_s = signals(df, strat)
     o, h, lo, c = (df[k].to_numpy() for k in ("open", "high", "low", "close"))
     t = df.time.to_numpy()

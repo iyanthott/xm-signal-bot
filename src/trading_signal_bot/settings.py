@@ -412,10 +412,10 @@ def load_yaml_config(config_path: Path) -> AppConfig:
     )
 
     # Resolve relative file paths against project root.
-    # For the standard layout `<root>/config/settings.yaml`, use `<root>`
+    # For the standard layout `<root>/config/<anything>.yaml`, use `<root>`
     # as the project root. Otherwise, resolve relative to the config directory.
     config_dir = config_path.parent
-    if config_dir.name == "config" and config_path.name == "settings.yaml":
+    if config_dir.name == "config":
         project_root = config_dir.parent
     else:
         project_root = config_dir
