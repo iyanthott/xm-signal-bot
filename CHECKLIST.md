@@ -1,11 +1,11 @@
 # CHECKLIST.md — trading-signal-bot ("Poging Kita" bots)
 Living record per CLAUDE.md §7. Updated the same session work ships.
-Last updated: 2026-11-21 (account-wide risk breaker added; 7 new symbols added across bots 3/4/5/6, all
-config-only reuse of already-proven strategies; W7 web reporter built for the xm-web dashboard - see entries
-below. Pushed to the fork (`iyanthott/xm-signal-bot` `feature/settings-editor` `6a62961`) via `cpds`, same
-session the xm-web side deployed. The 6 live bot processes on Adrian's PC were restarted earlier with the
-risk breaker + new symbols only, NOT with this commit or the W7 reporter - a further restart is needed once
-bot tokens exist; see xm-web's `CHECKLIST.md` for why that step is blocked)
+Last updated: 2026-11-21 (account-wide risk breaker; 7 new symbols across bots 3/4/5/6; W7 web reporter LIVE
+with real prod tokens (Dip/Trend/VBO/CBO/M1 each got their own Bot + token via `create-strategy-bots.yml`,
+main bot reuses its existing one); then a security/code review found and fixed 3 bugs (atomic trades.json
+write, CBO's unreachable time-stop, VBO's ambiguous dual-level entry) - see entries below. All of this is
+pushed to the fork (`iyanthott/xm-signal-bot` `feature/settings-editor`, now at `d7a3605`) and all 6 live bot
+processes on Adrian's PC have been restarted twice this session, most recently onto `d7a3605`)
 
 ### Plan & phases
 - [ ] No single governing `*_PLAN.md` for this repo — built bot-by-bot by direct approval each session
@@ -88,14 +88,33 @@ bot tokens exist; see xm-web's `CHECKLIST.md` for why that step is blocked)
       that bot's own token (`XM_DIP_WEB_TOKEN` / `XM_TREND_WEB_TOKEN` / `XM_VBO_WEB_TOKEN` / `XM_CBO_WEB_TOKEN`;
       main bot reuses `XM_SETTINGS_TOKEN`, M1 the same var in its own `.env.m1`). Wired into all 6 bot
       processes' `main()`. 7 new unit tests (`test_web_report.py` + 1 in `test_trader.py`), 210 total, all green,
-      ruff + mypy clean. **No token is set anywhere yet** - the reporter is present in the code but inert on
-      every currently-running bot; the 6 live processes were restarted today for the risk breaker and new
-      symbols ONLY, before this was wired in, so they are not even running this code yet. Nothing changes live
-      until `npm run db:create-strategy-bots` is run against the xm-web PROD database and the tokens it prints
-      are pasted into `.env`/`.env.m1` - deliberately left undone per Adrian's "do not deploy yet."
+      ruff + mypy clean. **LIVE as of 2026-11-21:** Adrian ran `create-strategy-bots.yml` against prod (5 new
+      Bot rows + tokens for M1/Dip/Trend/VBO/CBO); tokens pasted into `.env`/`.env.m1`; all 6 bots restarted
+      and confirmed reporting with zero errors across a full 60s cycle. The dashboard at
+      pogingkita.stayatdiez.com/dashboard is receiving real account/trade data from all 6 bots.
+- [x] **Code review (2026-11-21, `code-review` skill at `high` + manual pass) found and fixed 3 real bugs,
+      all pushed + live** (`d7a3605`):
+      1. `trader.py::_save_state()` now uses `atomic_write_json()` instead of a plain truncate-then-write.
+         `risk_guard.py` reads this same file from OTHER bot processes concurrently; a half-written file was
+         silently treated as zero risk (`except (OSError, ValueError): continue`), which could let the
+         account-wide breaker fail to trip exactly when a write collided with a check.
+      2. `cbo_bot.py::_daily()`'s raw MT5 fetch was sized only for the signal lookback (`entry_days+40`), not
+         for the 120-day time stop; after the weekday filter removed weekends the window shrank to ~110 bars,
+         so `bars_in_trade` could never reach `max_days=120` - the documented time-stop could never fire. Now
+         sized off `max(entry_days+40, max_days+20)` converted to calendar days. Regression test reproduces
+         this with a real 400-day calendar feed (weekends included, unlike the usual weekday-only test fixture).
+      3. `vbo_bot.py`'s entry check used if/elif, so a quote where ask was past the upper breakout level AND
+         bid was past the lower level at once (e.g. a gap) always resolved to BUY - contradicting the
+         backtest's own ambiguous-bar skip rule (`research/daily_lab.py::simulate_vbo`). Now explicitly
+         skipped and logged when both are touched at once; a later unambiguous touch still trades normally.
+      Also found but NOT in scope of this fix (pre-existing, unrelated to this session's new code): an M1-only
+      ATR/risk-context mismatch in `strategy.py`, a settings-candidate-file race in `remote_settings.py`, a
+      missing `poll_closed()` call in `dip_bot.py`'s same-bar reversal path, and a latent `_position_ticket`
+      fallback bug in `trader.py` (unreachable under every currently-shipped config). Not fixed - flagged only.
+      212 tests pass (3 new), ruff + mypy clean. All 6 live bots restarted onto this commit.
 
 ### QA
-- [x] Functional tests passed: 203 tests total (189 unit + integration/replay), all green as of 2026-11-21
+- [x] Functional tests passed: 212 unit tests + integration/replay, all green as of 2026-11-21
 - [x] Edge cases tested per bot: demo-account refusal, kill-file pause, daily-loss limit, one-position-per-symbol,
       time stops, exit-rule parity with backtest, late-entry skip, reversal (bot 4), account-wide risk breaker
       (tripped-blocks-entry and cap-disabled-at-zero cases, isolated from the real on-disk `data/*/trades.json`)
