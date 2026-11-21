@@ -23,6 +23,7 @@ from pathlib import Path
 from typing import Any
 from zoneinfo import ZoneInfo
 
+from trading_signal_bot import risk_guard
 from trading_signal_bot.models import Direction, Scenario, Signal
 
 MAGIC = 570031
@@ -44,6 +45,8 @@ class TradeConfig:
     magic: int = MAGIC  # separate per bot instance so each only sees its own trades
     scenarios: frozenset[Scenario] = LEGACY_SCENARIOS
     label: str = ""  # prefix for Telegram messages, e.g. "[M1]"
+    risk_cap_pct: float = 5.0  # account-wide open-risk breaker; <= 0 disables it
+    risk_state_files: tuple[Path, ...] | None = None  # None = risk_guard.DEFAULT_STATE_FILES
 
 
 def load_trade_config(env: Mapping[str, str | None]) -> TradeConfig:
@@ -74,6 +77,7 @@ def load_trade_config(env: Mapping[str, str | None]) -> TradeConfig:
         magic=int(num("XM_TRADE_MAGIC", MAGIC, 1, 2_000_000_000)),
         scenarios=_parse_scenarios(env.get("XM_TRADE_SCENARIOS")),
         label=(env.get("XM_BOT_LABEL") or "").strip(),
+        risk_cap_pct=num("XM_RISK_CAP_PCT", 5.0, 0.0, 100.0),
     )
 
 
@@ -101,6 +105,28 @@ class _Tracked:
     exit_reason: str = ""  # set when the bot itself closes the position (exit rule)
 
 
+@dataclass(frozen=True)
+class ClosedTrade:
+    """A position that just closed, with the result _poll_closed computed. Handed to `on_closed` right before
+    it is dropped from `_tracked` - this is the only place that information exists (trades.json only ever
+    holds OPEN positions; a closed one is removed, not archived)."""
+
+    ticket: int
+    symbol: str
+    direction: str
+    volume: float
+    entry: float
+    sl: float
+    tp: float
+    risk_money: float
+    scenario: str
+    opened_utc: str
+    closed_utc: str
+    exit_price: float
+    pnl: float
+    exit_reason: str
+
+
 @dataclass
 class DemoTrader:
     config: TradeConfig
@@ -108,8 +134,10 @@ class DemoTrader:
     resolve_symbol: Callable[[str], str]
     notify: Callable[[str], bool]
     now_fn: Callable[[], datetime] = lambda: datetime.now(timezone.utc)
+    on_closed: Callable[[ClosedTrade], None] | None = None
     _tracked: dict[int, _Tracked] = field(default_factory=dict)
     _day_stop_notified: str = ""
+    _risk_breaker_notified: str = ""
     _demo_ok: bool | None = None
     _logger: logging.Logger = field(default_factory=lambda: logging.getLogger("DemoTrader"))
 
@@ -235,6 +263,26 @@ class DemoTrader:
                     "No new trades today (Manila time). Alerts continue."
                 )
             self._logger.warning("daily loss limit reached: %.2f <= %.2f", day_pnl, limit)
+            return
+
+        state_files = (
+            self.config.risk_state_files
+            if self.config.risk_state_files is not None
+            else risk_guard.DEFAULT_STATE_FILES
+        )
+        tripped, open_pct = risk_guard.breaker_tripped(balance, self.config.risk_cap_pct, state_files)
+        if tripped:
+            key = self._day_bounds_utc()[0].isoformat()
+            if self._risk_breaker_notified != key:
+                self._risk_breaker_notified = key
+                self.notify(
+                    f"RISK BREAKER: total open risk {open_pct:.1f}% >= cap {self.config.risk_cap_pct:g}%. "
+                    "No new trades account-wide until open risk drops. Existing positions unaffected."
+                )
+            self._logger.warning(
+                "risk breaker tripped: %.2f%% open >= %.1f%% cap - skipping new entry for %s",
+                open_pct, self.config.risk_cap_pct, signal.symbol,
+            )
             return
 
         if len(self._open_positions(broker)) >= self.config.max_per_symbol:
@@ -437,6 +485,18 @@ class DemoTrader:
                 f"Ticket {ticket} | entry {t.entry} -> exit {exit_price}\n"
                 f"Result {profit:+.2f} ({r_mult:+.2f}R)"
             )
+            if self.on_closed is not None:
+                try:
+                    self.on_closed(
+                        ClosedTrade(
+                            ticket=t.ticket, symbol=t.symbol, direction=t.direction, volume=t.volume,
+                            entry=t.entry, sl=t.sl, tp=t.tp, risk_money=t.risk_money, scenario=t.scenario,
+                            opened_utc=t.opened_utc, closed_utc=self.now_fn().isoformat(),
+                            exit_price=exit_price, pnl=profit, exit_reason=reason,
+                        )
+                    )
+                except Exception:
+                    self._logger.exception("on_closed callback failed for ticket %s", ticket)
         if changed:
             self._save_state()
 

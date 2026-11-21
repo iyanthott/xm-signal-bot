@@ -89,6 +89,7 @@ def load_dip_config(env: Mapping[str, str | None]) -> tuple[DipConfig, TradeConf
         magic=int(num("XM_DIP_MAGIC", DIP_MAGIC, 1, 2_000_000_000)),
         scenarios=frozenset({Scenario.BUY_DIP}),
         label="[DIP]",
+        risk_cap_pct=num("XM_RISK_CAP_PCT", 5.0, 0.0, 100.0),
     )
     return dip, trade
 
@@ -285,7 +286,14 @@ def main() -> None:
         chat_id=secrets.telegram_chat_id,
         failed_queue_file=Path("data/dip/failed_messages.json"),
     )
-    trader = DemoTrader(trade_cfg, mt5, lambda s: dip_cfg.markets.get(s, s), tg.send_text)
+    from trading_signal_bot.web_report import WebTradeReporter, load_web_report_config
+
+    report_cfg = load_web_report_config(os.environ, "XM_DIP_WEB_TOKEN")
+    reporter = WebTradeReporter(report_cfg) if report_cfg else None
+    trader = DemoTrader(
+        trade_cfg, mt5, lambda s: dip_cfg.markets.get(s, s), tg.send_text,
+        on_closed=reporter.on_closed if reporter else None,
+    )
     bot = DipBot(dip_cfg, trader, mt5, tg.send_text)
 
     stop = {"flag": False}
@@ -306,6 +314,7 @@ def main() -> None:
             "It checks once per day at the market open; expect about 2-3 trades a month."
         )
         last_beat = 0.0
+        last_report = 0.0
         while not stop["flag"]:
             if mt5.terminal_info() is None:
                 LOG.error("MT5 connection lost; reconnecting")
@@ -315,6 +324,9 @@ def main() -> None:
                     else mt5.initialize()
                 )
             bot.step()
+            if reporter is not None and time.time() - last_report > 60:
+                reporter.report(trader, mt5)
+                last_report = time.time()
             if time.time() - last_beat > 3600:
                 LOG.info("heartbeat ok open_trades=%d", len(trader.open_trades()))
                 last_beat = time.time()

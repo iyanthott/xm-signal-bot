@@ -49,6 +49,7 @@ from trading_signal_bot.utils import (
     utc_now,
 )
 from trading_signal_bot.web_feed import FeedSubscriber, WebSignalPublisher, load_feed_config
+from trading_signal_bot.web_report import WebTradeReporter, load_web_report_config
 
 
 class TradingSignalBotApp:
@@ -71,8 +72,10 @@ class TradingSignalBotApp:
         self._secrets = secrets
         self._dry_run = dry_run
         self._web_publisher: WebSignalPublisher | None = None
+        self._web_reporter: WebTradeReporter | None = None
         self._trader: DemoTrader | None = None
         self._last_trade_poll = 0.0
+        self._last_web_report = 0.0
         self._logger = logging.getLogger(self.__class__.__name__)
         self._last_processed_m15_close: dict[str, datetime] = {}
         self._last_processed_m1_close: dict[str, datetime] = {}
@@ -255,6 +258,7 @@ class TradingSignalBotApp:
         deadline = time.monotonic() + seconds
         while time.monotonic() < deadline and not self._shutdown_requested:
             self._poll_trades()
+            self._report_web()
             remaining = deadline - time.monotonic()
             time.sleep(min(1.0, max(0, remaining)))
 
@@ -867,6 +871,7 @@ class TradingSignalBotApp:
             mt5=self._mt5.raw,
             resolve_symbol=self._mt5.resolve_symbol,
             notify=self._telegram.send_text,
+            on_closed=self._web_reporter.on_closed if self._web_reporter else None,
         )
 
     def _poll_trades(self) -> None:
@@ -878,8 +883,21 @@ class TradingSignalBotApp:
         self._last_trade_poll = now
         self._trader.poll_closed()
 
+    def _report_web(self) -> None:
+        if self._trader is None or self._web_reporter is None:
+            return
+        now = time.monotonic()
+        if now - self._last_web_report < 60:
+            return
+        self._last_web_report = now
+        self._web_reporter.report(self._trader, self._mt5.raw)
+
     def set_web_publisher(self, publisher: WebSignalPublisher | None) -> None:
         self._web_publisher = publisher
+
+    def set_web_reporter(self, reporter: WebTradeReporter | None) -> None:
+        """Must be called BEFORE build_trader() - the trader's on_closed callback is wired at construction."""
+        self._web_reporter = reporter
 
     def notify_text(self, text: str) -> bool:
         """Plain text to the owner's own Telegram chat (shared alerts from followed bots)."""
@@ -1036,6 +1054,11 @@ def main() -> None:
                 logger.info(
                     "forwarding alerts shared by followed bots to your Telegram (XM_FOLLOW_FEED)"
                 )
+        report_cfg = None if args.dry_run else load_web_report_config(os.environ, "XM_SETTINGS_TOKEN")
+        reporter: WebTradeReporter | None = WebTradeReporter(report_cfg) if report_cfg else None
+        if reporter is not None:
+            app.set_web_reporter(reporter)
+            logger.info("reporting trades and account balance to the website dashboard (XM_SETTINGS_TOKEN)")
         try:
             app.startup()
             trader = app.build_trader()

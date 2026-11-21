@@ -102,6 +102,7 @@ def load_cbo_config(env: Mapping[str, str | None]) -> tuple[CboConfig, TradeConf
         magic=int(num("XM_CBO_MAGIC", CBO_MAGIC, 1, 2_000_000_000)),
         scenarios=frozenset({Scenario.BREAKOUT_CANDLE}),
         label="[CBO]",
+        risk_cap_pct=num("XM_RISK_CAP_PCT", 5.0, 0.0, 100.0),
     )
     return cbo, trade
 
@@ -301,7 +302,14 @@ def main() -> None:
         chat_id=secrets.telegram_chat_id,
         failed_queue_file=Path("data/cbo/failed_messages.json"),
     )
-    trader = DemoTrader(trade_cfg, mt5, lambda s: cbo_cfg.markets.get(s, s), tg.send_text)
+    from trading_signal_bot.web_report import WebTradeReporter, load_web_report_config
+
+    report_cfg = load_web_report_config(os.environ, "XM_CBO_WEB_TOKEN")
+    reporter = WebTradeReporter(report_cfg) if report_cfg else None
+    trader = DemoTrader(
+        trade_cfg, mt5, lambda s: cbo_cfg.markets.get(s, s), tg.send_text,
+        on_closed=reporter.on_closed if reporter else None,
+    )
     bot = CboBot(cbo_cfg, trader, mt5, tg.send_text)
 
     stop = {"flag": False}
@@ -323,11 +331,15 @@ def main() -> None:
             "55-day breakout gated on a strong-bodied candle; expect about 3 trades a year."
         )
         last_beat = 0.0
+        last_report = 0.0
         while not stop["flag"]:
             if mt5.terminal_info() is None:
                 LOG.error("MT5 connection lost; reconnecting")
                 connect()
             bot.step()
+            if reporter is not None and time.time() - last_report > 60:
+                reporter.report(trader, mt5)
+                last_report = time.time()
             if time.time() - last_beat > 3600:
                 LOG.info("heartbeat ok open_trades=%d", len(trader.open_trades()))
                 last_beat = time.time()

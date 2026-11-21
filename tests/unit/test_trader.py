@@ -78,11 +78,13 @@ def make_signal(symbol="XAUUSD", direction=Direction.BUY, scenario=Scenario.BUY_
 
 def make_trader(tmp_path: Path, mt5: FakeMT5, **kw) -> tuple[DemoTrader, list[str]]:
     msgs: list[str] = []
+    kw.setdefault("risk_state_files", ())  # isolate from the real bots' data/*.json on this machine
+    on_closed = kw.pop("on_closed", None)
     cfg = TradeConfig(
         enabled=kw.pop("enabled", True), kill_file=tmp_path / "PAUSE", state_file=tmp_path / "t.json", **kw
     )
     t = DemoTrader(cfg, mt5, lambda s: {"XAUUSD": "GOLD", "NAS100": "US100Cash"}.get(s, s),
-                   lambda m: msgs.append(m) or True, now_fn=lambda: NOW)
+                   lambda m: msgs.append(m) or True, now_fn=lambda: NOW, on_closed=on_closed)
     return t, msgs
 
 
@@ -142,6 +144,29 @@ def test_daily_loss_limit_blocks_new_trades(tmp_path):
     assert "DAILY LOSS LIMIT" in msgs[0]
 
 
+def test_risk_breaker_blocks_new_entry_account_wide(tmp_path):
+    mt5 = FakeMT5()
+    other_bot_state = tmp_path / "other_bot.json"
+    other_bot_state.write_text(
+        '{"9": {"risk_money": 600.0, "exit_reason": ""}}', encoding="utf-8"
+    )  # 6% of the 10000 balance, from a DIFFERENT bot's state file
+    t, msgs = make_trader(tmp_path, mt5, risk_cap_pct=5.0, risk_state_files=(other_bot_state,))
+    t.on_signal(make_signal())
+    assert mt5.sent == []
+    assert "RISK BREAKER" in msgs[0]
+
+
+def test_risk_breaker_disabled_when_cap_is_zero(tmp_path):
+    mt5 = FakeMT5()
+    other_bot_state = tmp_path / "other_bot.json"
+    other_bot_state.write_text(
+        '{"9": {"risk_money": 600.0, "exit_reason": ""}}', encoding="utf-8"
+    )
+    t, _ = make_trader(tmp_path, mt5, risk_cap_pct=0.0, risk_state_files=(other_bot_state,))
+    t.on_signal(make_signal())
+    assert len(mt5.sent) == 1
+
+
 def test_skips_when_min_lot_exceeds_double_risk(tmp_path):
     mt5 = FakeMT5(balance=100.0)  # budget 1.0; min lot risks 5.0
     t, msgs = make_trader(tmp_path, mt5)
@@ -168,6 +193,29 @@ def test_close_reported_once_with_result(tmp_path):
     t.poll_closed()
     closed = [m for m in msgs if "TRADE CLOSED" in m]
     assert len(closed) == 1 and "WIN" in closed[0] and "take profit" in closed[0] and "+1.50R" in closed[0]
+
+
+def test_on_closed_callback_fires_with_result_and_never_breaks_polling_if_it_raises(tmp_path):
+    mt5 = FakeMT5()
+    seen = []
+    t, msgs = make_trader(tmp_path, mt5, on_closed=lambda ct: seen.append(ct))
+    t.on_signal(make_signal())
+    mt5.positions.clear()
+    mt5.deals = [NS(position_id=555, entry=1, profit=150.0, commission=0, swap=0, price=2007.6, magic=MAGIC)]
+    t.poll_closed()
+    assert len(seen) == 1
+    ct = seen[0]
+    assert ct.ticket == 555 and ct.symbol == "XAUUSD" and ct.direction == "BUY"
+    assert ct.exit_price == 2007.6 and ct.pnl == 150.0 and ct.exit_reason == "take profit"
+    assert ct.opened_utc and ct.closed_utc
+
+    mt5_2 = FakeMT5()
+    t2, msgs2 = make_trader(tmp_path / "t2", mt5_2, on_closed=lambda ct: (_ for _ in ()).throw(RuntimeError("boom")))
+    t2.on_signal(make_signal(symbol="NAS100"))
+    mt5_2.positions.clear()
+    mt5_2.deals = [NS(position_id=555, entry=1, profit=10.0, commission=0, swap=0, price=1.0, magic=MAGIC)]
+    t2.poll_closed()  # must not raise even though the callback does
+    assert any("TRADE CLOSED" in m for m in msgs2)
 
 
 def test_tracked_trades_survive_restart(tmp_path):
