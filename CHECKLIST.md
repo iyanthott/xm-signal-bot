@@ -2,8 +2,10 @@
 Living record per CLAUDE.md §7. Updated the same session work ships.
 Last updated: 2026-11-21 (account-wide risk breaker added; 7 new symbols added across bots 3/4/5/6, all
 config-only reuse of already-proven strategies; W7 web reporter built for the xm-web dashboard - see entries
-below. Nothing in this update is deployed; all 6 live bot processes were restarted with the risk breaker +
-new symbols only, NOT with the W7 reporter, which has no real tokens yet)
+below. Pushed to the fork (`iyanthott/xm-signal-bot` `feature/settings-editor` `6a62961`) via `cpds`, same
+session the xm-web side deployed. The 6 live bot processes on Adrian's PC were restarted earlier with the
+risk breaker + new symbols only, NOT with this commit or the W7 reporter - a further restart is needed once
+bot tokens exist; see xm-web's `CHECKLIST.md` for why that step is blocked)
 
 ### Plan & phases
 - [ ] No single governing `*_PLAN.md` for this repo — built bot-by-bot by direct approval each session
