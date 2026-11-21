@@ -25,6 +25,7 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import math
 import os
 import signal as os_signal
 import time
@@ -156,9 +157,14 @@ class CboBot:
 
     def _daily(self, broker: str) -> pd.DataFrame | None:
         self.mt5.symbol_select(broker, True)
-        need = self.config.entry_days + 40
-        rates = self.mt5.copy_rates_from_pos(broker, self.mt5.TIMEFRAME_D1, 0, need + 60)
-        if rates is None or len(rates) < need:
+        # The window must hold enough WEEKDAY bars for both the signal lookback (entry_days+40) and the
+        # time-stop (max_days=120 by default) - fetching raw calendar bars and then dropping weekends shrinks
+        # the count by ~2/7, so a raw fetch sized only for entry_days silently caps bars_in_trade below
+        # max_days and the time stop can never fire. Inflate the raw fetch to compensate.
+        need_weekdays = max(self.config.entry_days + 40, self.config.max_days + 20)
+        need_raw = math.ceil(need_weekdays * 7 / 5) + 60
+        rates = self.mt5.copy_rates_from_pos(broker, self.mt5.TIMEFRAME_D1, 0, need_raw)
+        if rates is None or len(rates) < need_weekdays:
             return None
         df = pd.DataFrame(rates)[["time", "open", "high", "low", "close"]]
         df["time"] = pd.to_datetime(df["time"], unit="s")  # server time

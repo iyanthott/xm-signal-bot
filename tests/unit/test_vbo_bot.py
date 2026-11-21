@@ -91,6 +91,28 @@ def test_no_entry_while_price_stays_inside_todays_levels(tmp_path):
     assert mt5.sent == []
 
 
+def test_skips_entry_when_both_levels_are_touched_in_the_same_check(tmp_path):
+    """Regression test: level_up/level_dn used to be checked with if/elif, so a quote straddling both
+    (ask past level_up AND bid past level_dn at once - e.g. a wide-spread quote during a gap) always
+    resolved to BUY, contradicting the ambiguous-bar skip rule the backtest itself uses
+    (research/daily_lab.py::simulate_vbo)."""
+    closes = flat()
+    mt5 = FakeMT5Vbo(with_forming(closes))
+    bot, _, msgs = make_bot(tmp_path, mt5)
+    # level_up = 2005, level_dn = 1995 (open 2000 +/- 0.5 x range 10); force a quote whose ask is past
+    # level_up AND whose bid is past level_dn at the same time, unlike FakeMT5Vbo.set_price's fixed 0.5 spread.
+    mt5.symbol_info_tick = lambda _s: NS(ask=2010.0, bid=1990.0, time=mt5.tick_time)
+    run_pass(bot, mt5)
+    assert mt5.sent == [], "an ambiguous double-touch must not pick a direction"
+
+    # the day is not marked "entered" by the skip, so a later, unambiguous touch still trades normally
+    mt5.symbol_info_tick = lambda _s: NS(ask=2010.0, bid=2009.5, time=mt5.tick_time)
+    mt5.advance_tick()
+    bot.step()
+    assert len(mt5.sent) == 1 and mt5.sent[0]["type"] == mt5.ORDER_TYPE_BUY
+    assert any("[VBO] SIGNAL ETH BUY" in m for m in msgs)
+
+
 def test_only_one_entry_attempt_per_day(tmp_path):
     closes = flat()
     mt5 = FakeMT5Vbo(with_forming(closes))

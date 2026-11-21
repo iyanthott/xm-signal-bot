@@ -1,21 +1,32 @@
 from __future__ import annotations
 
 from pathlib import Path
+from types import SimpleNamespace as NS  # noqa: N814
 
+import numpy as np
+import pandas as pd
 import pytest
 from test_dip_bot import FakeMT5
 
-from trading_signal_bot.cbo_bot import CBO_MAGIC, CboBot, CboConfig, breakout_candle_signal, load_cbo_config
-from trading_signal_bot.trader import DemoTrader
+from trading_signal_bot.cbo_bot import (
+    CBO_MAGIC,
+    CboBot,
+    CboConfig,
+    breakout_candle_signal,
+    load_cbo_config,
+)
+from trading_signal_bot.trader import DemoTrader, _Tracked
 
 ROOT = Path(__file__).resolve().parents[2]
 
 
-def flat(n: int = 120, level: float = 2000.0) -> list[float]:
+def flat(n: int = 150, level: float = 2000.0) -> list[float]:
+    # Must cover need_weekdays = max(entry_days+40, max_days+20) = max(95, 140) = 140 for the default
+    # CboConfig (entry_days=55, max_days=120) - see cbo_bot.py::_daily.
     return [level] * n
 
 
-def uptrend(n: int = 120) -> list[float]:
+def uptrend(n: int = 150) -> list[float]:
     return [1000 + 10 * i for i in range(n)]
 
 
@@ -91,7 +102,7 @@ def test_plain_breakout_without_strong_candle_is_ignored(tmp_path):
 
 
 def test_no_signal_inside_the_channel(tmp_path):
-    flat_wobble = [2000 + (5 if i % 2 else -5) for i in range(120)]
+    flat_wobble = [2000 + (5 if i % 2 else -5) for i in range(150)]
     mt5 = FakeMT5(with_forming(flat_wobble))
     bot, _, _ = make_bot(tmp_path, mt5)
     run_pass(bot, mt5)
@@ -112,6 +123,45 @@ def test_time_stop_after_max_days(tmp_path):
         if day < 3:
             assert trader.open_trades(), f"closed too early on day {day}"
     assert trader.open_trades() == []
+    assert any("time stop" in m for m in msgs if "TRADE CLOSED" in m)
+
+
+def real_calendar_bars(mt5: FakeMT5, n: int, level: float = 2000.0, end: int = 1_700_000_000) -> None:
+    """Overwrite mt5.rates with `n` consecutive REAL calendar days (weekends included, unlike
+    FakeMT5.set_bars which deliberately skips them) ending at a forming bar at `end`. Reproduces what MT5
+    actually returns before the bot's own weekday filter runs."""
+    day = 86400
+    end = end - (end % day)
+    times = [end - (n - 1 - i) * day for i in range(n)]
+    c = np.array([level] * n, dtype=float)
+    mt5.rates = np.zeros(n, dtype=[("time", "i8"), ("open", "f8"), ("high", "f8"), ("low", "f8"), ("close", "f8")])
+    mt5.rates["time"], mt5.rates["open"], mt5.rates["close"] = times, c, c
+    mt5.rates["high"], mt5.rates["low"] = c + 5, c - 5
+    mt5.tick_time = int(times[-1]) + 3600
+
+
+def test_time_stop_fires_even_though_the_feed_includes_real_weekends(tmp_path):
+    """Regression test: entry_days=55 + max_days=120 (both defaults) used to fetch too few RAW calendar
+    bars for the post-weekend-filter window to ever reach 120 weekday bars, so bars_in_trade plateaued
+    below max_days and the time stop could never fire. See _daily()'s need_weekdays/need_raw comment."""
+    mt5 = FakeMT5(with_forming(flat(5)))
+    real_calendar_bars(mt5, 400)  # far more raw calendar days than entry_days+40 or max_days alone suggest
+    bot, trader, msgs = make_bot(tmp_path, mt5)  # default max_days=120
+    closed = bot._daily("GOLD").iloc[:-1]
+    assert len(closed) >= 120, "the weekday-filtered window must hold at least max_days bars"
+
+    ticket = 9001
+    trader._tracked[ticket] = _Tracked(
+        ticket=ticket, symbol="GOLD", direction="BUY", volume=0.1, entry=2000.0, sl=1990.0, tp=0.0,
+        risk_money=50.0, scenario="BREAKOUT_CANDLE", opened_utc="2000-01-01T00:00:00+00:00",
+    )
+    mt5.positions.append(NS(ticket=ticket, identifier=ticket, symbol="GOLD", magic=CBO_MAGIC, volume=0.1, profit=0.0))
+    # An entry bar older than every bar in the window makes bars_in_trade == len(closed) - the worst case
+    # for the OLD formula (window capped around ~110) and a case the NEW formula comfortably covers (>=120).
+    bot._state["entry_bar"][str(ticket)] = str(closed.time.iloc[0] - pd.Timedelta(days=1))
+
+    run_pass(bot, mt5)
+    assert trader.open_trades() == [], "the time stop must fire once bars_in_trade reaches max_days"
     assert any("time stop" in m for m in msgs if "TRADE CLOSED" in m)
 
 

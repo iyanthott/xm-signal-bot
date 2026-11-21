@@ -174,11 +174,17 @@ class VboBot:
         # --- entry: has today's stop level been touched yet?
         level_up, level_dn = day_state.get("level_up"), day_state.get("level_dn")
         already_open = any(t.symbol == label for t in self.trader.open_trades())
-        if not day_state.get("entered") and not already_open and level_up is not None:
-            if float(tick.ask) >= level_up:
+        if not day_state.get("entered") and not already_open and level_up is not None and level_dn is not None:
+            hit_up = float(tick.ask) >= level_up
+            hit_dn = float(tick.bid) <= level_dn
+            if hit_up and hit_dn:
+                # Both levels touched in the same check: which one came first is unknown (matches the
+                # ambiguous-bar skip rule in research/daily_lab.py::simulate_vbo) - do not guess a direction.
+                LOG.warning("%s: both VBO levels touched in the same check; skipping (ambiguous)", label)
+            elif hit_up:
                 self._enter(label, closed, tick, 1, forming.time, level_up)
                 day_state["entered"] = True
-            elif float(tick.bid) <= level_dn:
+            elif hit_dn:
                 self._enter(label, closed, tick, -1, forming.time, level_dn)
                 day_state["entered"] = True
 

@@ -25,6 +25,7 @@ from zoneinfo import ZoneInfo
 
 from trading_signal_bot import risk_guard
 from trading_signal_bot.models import Direction, Scenario, Signal
+from trading_signal_bot.utils import atomic_write_json
 
 MAGIC = 570031
 COMMENT = "XMBOT"
@@ -519,9 +520,10 @@ class DemoTrader:
             self._tracked = {}
 
     def _save_state(self) -> None:
+        # Atomic (write to a temp file, then os.replace): risk_guard.py reads this same file from OTHER bot
+        # processes concurrently, and a plain truncate-then-write can hand it a half-written/empty file mid-save.
         try:
-            self.config.state_file.parent.mkdir(parents=True, exist_ok=True)
             data = {str(k): v.__dict__ for k, v in self._tracked.items()}
-            self.config.state_file.write_text(json.dumps(data, indent=1), encoding="utf-8")
+            atomic_write_json(self.config.state_file, data)
         except OSError:
             self._logger.exception("could not save trade state")
