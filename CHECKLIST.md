@@ -13,8 +13,17 @@ processes on Adrian's PC have been restarted twice this session, most recently o
 - [x] `verify` run informally each session via pytest; no formal phase gates (not a phased project)
 
 ### Development
-- [x] Bot 1 — M15 strategy bot (magic 570031), legacy S1/S2 scenarios, `scripts/run_supervised.ps1`
-- [x] Bot 2 — M1 bot (magic 570032), `[M1]` label, `scripts/run_m1_bot.ps1` + `.env.m1`
+- [x] **RETIRED 2026-11-24** — Bot 1 — M15 strategy bot (magic 570031), legacy S1/S2 scenarios,
+      `scripts/run_supervised.ps1`. Never run through the `daily_lab.py`/`strategy_lab.py` validation
+      framework (predates it — inherited as-is from the Mineaworld fork). Live result this week: 4 closed
+      trades, 0 wins, -$393.12, all FX pairs. Matches prior research exactly ("intraday trend-pullback H1,
+      opening-range breakout M15 and mean-reversion M15 LOSE after spread... FX worst", 2026-11-19) — Bot 1's
+      LWMA-cross + Stochastic-zone logic is that same category, just never re-tested until live money proved
+      it. Process tree stopped (was already flat, 0 open positions, so no disruption); `data/TRADING_PAUSED`
+      kill file left in place as a second guard. Not deleted — code stays for reference/possible reuse.
+- [x] **RETIRED 2026-11-24** — Bot 2 — M1 bot (magic 570032), `[M1]` label, `scripts/run_m1_bot.ps1` +
+      `.env.m1`. Same unvalidated legacy engine as Bot 1, smaller sample but same direction: 3 closed, 1W/2L,
+      -$29.21. Process tree stopped (was flat); `data/m1/TRADING_PAUSED` left in place.
 - [x] Bot 3 — Daily Dip (magic 570033), `[DIP]`, US500+NAS100+GBPUSD+CA60+SA40, `scripts/run_dip_bot.ps1`
       (2026-11-19; GBPUSD added 2026-11-20, test_PF 1.82/80 trades; CA60Cash+SA40Cash added 2026-11-21, see
       Opportunity scan entry below - all config-only, zero new code)
@@ -112,6 +121,28 @@ processes on Adrian's PC have been restarted twice this session, most recently o
       missing `poll_closed()` call in `dip_bot.py`'s same-bar reversal path, and a latent `_position_ticket`
       fallback bug in `trader.py` (unreachable under every currently-shipped config). Not fixed - flagged only.
       212 tests pass (3 new), ruff + mypy clean. All 6 live bots restarted onto this commit.
+- [x] Momentum Burst / Episodic Pivot research (2026-11-24, Adrian asked after seeing a trading-education
+      reel naming Pradeep Bonde/"StockBee"): new `research/momentum_burst_lab.py`, same train/test discipline,
+      tested against the real 40-stock universe (volume = MT5 tick_volume, a proxy, not real share volume -
+      flagged as a caveat, not a confirmation). Momentum Burst (4%+ day on 1.5x+ volume, trend-filtered):
+      **rejected** - 879 trades pooled, avg expR -0.265, 0/40 markets pass; single-stock CFD spread (48-246bp
+      round trip, measured directly this run) eats the edge. Episodic Pivot (10%+ gap on 2x+ volume after a
+      quiet base): **inconclusive, not validated** - the setup is too rare to generate a statistically
+      meaningful sample (0.1-0.3 qualifying events/year/stock). No bot built. Pushed to the fork (`5ac04c2`).
+- [x] **Bots 1+2 formally retired 2026-11-24** (see entries above) - full process trees stopped, not just
+      paused; `TRADING_PAUSED` kill files left in place as a second guard.
+- [x] Full-universe rescan (2026-11-24, re-ran `daily_lab.py run` against the existing cached fetch to check
+      for any stock/symbol passing the strict bar that isn't already wired into a live bot): **none found** -
+      every symbol on the PASSED list (BTCUSD/JP225Cash/Nvidia/Netflix on `breakout`, GOLD/Nvidia on
+      `breakout_candle`, CA60Cash/SA40Cash/US100Cash/GBPUSD/US500Cash on `dip_long`, BRENTCash/ETHUSD/OILCash
+      on `vol_breakout`) is already running in Bots 3-6. This rescan also corrects the 2026-11-21 entry above:
+      Netflix was never actually the weak one - its `breakout` numbers (test_PF 1.61, test_n 17) are solid,
+      second only to BTC; JP225Cash remains the thin pass (train_PF only 1.15, test_n 16) and is the one
+      actually worth re-checking as it accumulates live trades.
+- [x] Checked Anthropic (`Anthropic`, Nasdaq ANT.OQ) after Adrian asked to watch it - **confirmed newly
+      tradable on this MT5 account** (IPO'd ~2026-11-19), but has only days of price history. Every strategy
+      here needs 200+ daily bars just for the trend filter, so it **cannot be backtested or traded yet** -
+      not a rejection, just too early. Revisit once it has a few months of history.
 
 ### QA
 - [x] Functional tests passed: 212 unit tests + integration/replay, all green as of 2026-11-21
