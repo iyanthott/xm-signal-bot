@@ -143,6 +143,16 @@ processes on Adrian's PC have been restarted twice this session, most recently o
       tradable on this MT5 account** (IPO'd ~2026-11-19), but has only days of price history. Every strategy
       here needs 200+ daily bars just for the trend filter, so it **cannot be backtested or traded yet** -
       not a rejection, just too early. Revisit once it has a few months of history.
+- [x] Weekly Telegram report (2026-11-24, Adrian asked after being told "give the fleet 2-3 weeks and
+      I'll track every closed trade"): new `scripts/weekly_report.py` - pulls REAL closed trades from MT5
+      `history_deals_get` (not the local `trades.json` files, which only ever hold open positions) for the
+      last 7 days, grouped by bot via magic number (Bots 1+2's magics deliberately excluded - retired), computes
+      win%/PF/net P&L per bot + total, sends as a plain-text message to the same Telegram chat the bots already
+      alert to. Tested both as `--dry-run` (console only) and for real (confirmed delivered to Telegram) before
+      scheduling. Registered as Windows Scheduled Task `XM-WeeklyReport`, weekly Monday 08:00 (the PC's system
+      clock is already Singapore Standard Time = UTC+8 = Manila, no DST either side, so this needs no extra
+      conversion). Runs `Interactive` logon as Adrian's own user - same requirement as the bots themselves
+      (PC on, logged in, MT5 open). Next run: 2026-11-30 08:00.
 - [x] **`cpds` 2026-11-24 (end of session):** 212 tests pass (unchanged - momentum_burst_lab.py is research
       tooling, no dedicated tests, same as daily_lab.py/strategy_lab.py). Fleet is now **4 live bots, not 6**
       (Dip/Trend/VBO/CBO; Bots 1+2 retired above) - all 4 confirmed healthy, recent heartbeats, zero errors.
