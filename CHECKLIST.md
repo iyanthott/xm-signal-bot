@@ -143,6 +143,13 @@ processes on Adrian's PC have been restarted twice this session, most recently o
       tradable on this MT5 account** (IPO'd ~2026-11-19), but has only days of price history. Every strategy
       here needs 200+ daily bars just for the trend filter, so it **cannot be backtested or traded yet** -
       not a rejection, just too early. Revisit once it has a few months of history.
+- [x] **`cpds` 2026-11-24 (end of session):** 212 tests pass (unchanged - momentum_burst_lab.py is research
+      tooling, no dedicated tests, same as daily_lab.py/strategy_lab.py). Fleet is now **4 live bots, not 6**
+      (Dip/Trend/VBO/CBO; Bots 1+2 retired above) - all 4 confirmed healthy, recent heartbeats, zero errors.
+      No deploy step for this repo (runs on Adrian's PC, not a hosted pipeline) and no live bot source changed
+      this session, so nothing needed redeploying - the running processes are already correct. Both commits
+      this session (`5ac04c2` momentum burst research, `ca1f7e1` this CHECKLIST + retirement) pushed to the
+      fork (`feature/settings-editor`). xm-web untouched this session - no xm-web deploy needed.
 
 ### QA
 - [x] Functional tests passed: 212 unit tests + integration/replay, all green as of 2026-11-21
