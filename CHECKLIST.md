@@ -1,6 +1,8 @@
 # CHECKLIST.md — trading-signal-bot ("Poging Kita" bots)
 Living record per CLAUDE.md §7. Updated the same session work ships.
-Last updated: 2026-11-21 (account-wide risk breaker; 7 new symbols across bots 3/4/5/6; W7 web reporter LIVE
+Last updated: 2026-11-26 (Bot 7 Fresh-Breakout Dip added on CHFJPY/GBPJPY/EURJPY; Dip bot IBS entry filter on
+US500/NAS100; `research/edge_lab.py` broad research rounds 1-3 - see entries below; 5 live bots, all on `fa43129`).
+Previous: 2026-11-21 (account-wide risk breaker; 7 new symbols across bots 3/4/5/6; W7 web reporter LIVE
 with real prod tokens (Dip/Trend/VBO/CBO/M1 each got their own Bot + token via `create-strategy-bots.yml`,
 main bot reuses its existing one); then a security/code review found and fixed 3 bugs (atomic trades.json
 write, CBO's unreachable time-stop, VBO's ambiguous dual-level entry) - see entries below. All of this is
@@ -26,7 +28,10 @@ processes on Adrian's PC have been restarted twice this session, most recently o
       -$29.21. Process tree stopped (was flat); `data/m1/TRADING_PAUSED` left in place.
 - [x] Bot 3 — Daily Dip (magic 570033), `[DIP]`, US500+NAS100+GBPUSD+CA60+SA40, `scripts/run_dip_bot.ps1`
       (2026-11-19; GBPUSD added 2026-11-20, test_PF 1.82/80 trades; CA60Cash+SA40Cash added 2026-11-21, see
-      Opportunity scan entry below - all config-only, zero new code)
+      Opportunity scan entry below - all config-only, zero new code). **2026-11-26: IBS entry filter** on
+      US500+NAS100 only (`XM_DIP_IBS_FILTER`, default 0.35: signal bar must close in the bottom 35% of its
+      range). Backtest US500 PF 1.47->1.79, NAS100 1.70->2.05, max DD ~-35%; plateau across 0.20-0.40, better
+      in train AND test; hurts GBPUSD/CA60 so they stay unfiltered. Commit `1bcf282`.
 - [x] Bot 4 — Crypto Trend (magic 570034), `[TREND]`, BTC+ETH+JP225Cash+Netflix Donchian 55/20 breakout,
       `scripts/run_trend_bot.ps1` (2026-11-19; JP225Cash+Netflix added 2026-11-21, see Opportunity scan entry
       below - the engine is symbol-agnostic breakout, not crypto-specific, despite the bot's name)
@@ -39,6 +44,15 @@ processes on Adrian's PC have been restarted twice this session, most recently o
       candle, `scripts/run_cbo_bot.ps1` (2026-11-20; Nvidia added 2026-11-21). Reuses Bot 4's exit rule directly
       (imported from trend_bot.py, not duplicated). Backtest: GOLD test_PF 2.55, 22 held-out trades. 8 new unit
       tests incl. live-vs-backtest formula parity, all green (200 total).
+- [x] Bot 7 — Fresh-Breakout Dip (magic 570037), `[FBD]`, CHFJPY+GBPJPY+EURJPY, `scripts/run_fbd_bot.ps1`
+      (2026-11-26, commit `fa43129`). Rule: 20-day high within the last 10 bars + close > SMA50 + RSI(2) < 10 ->
+      buy next open; exit next open after a close above the prior day's high, or 5 days; 2xATR stop; long only.
+      Backtest 2001-2026 (3-pair basket): 292 trades, 68% win, PF 1.67, +1.38R/yr, max DD 6.1R, 18/26 yrs +;
+      CHFJPY positive in both halves for all 18 nearby parameter sets. Caveat: AUD/CAD/NZD-JPY fail the same
+      rule (selection risk); the 3 pairs often enter together (46 shared days) - account risk cap applies.
+      Added to `risk_guard.DEFAULT_STATE_FILES` (all bots restarted so every process counts it) and to
+      `weekly_report.py`. 9 new unit tests incl. live-vs-research signal parity. **Web dashboard NOT wired yet**
+      (`XM_FBD_WEB_TOKEN` empty - needs a prod Bot row + token via xm-web `create-strategy-bots`; Adrian's call).
 - [x] `research/strategy_lab.py` + `research/daily_lab.py` — reusable backtest tooling, ~140-market universe
       research behind bots 3 and 4 (committed 2026-11-19)
 - [ ] No placeholders / stub code remaining — true for bots 1-4; M1 backtest validation never finished (noted gap)
@@ -160,9 +174,25 @@ processes on Adrian's PC have been restarted twice this session, most recently o
       this session, so nothing needed redeploying - the running processes are already correct. Both commits
       this session (`5ac04c2` momentum burst research, `ca1f7e1` this CHECKLIST + retirement) pushed to the
       fork (`feature/settings-editor`). xm-web untouched this session - no xm-web deploy needed.
+- [x] Prior-day-range fade research (2026-11-25, `research/range_fade_lab.py`, commit `1b0a814`): Adrian's
+      rule, 0/12 markets profitable blind; rejection-candle variant only US30 and parameter-fragile -> rejected,
+      watchlist only. (Back-filled here 2026-11-26 - this entry was missing.)
+- [x] Broad research, `research/edge_lab.py` (2026-11-26, Adrian: "create your own bots, no limit"). All fixed
+      rules, real spread + swap, 70/30 train/test, then parameter grids / 4 time windows / overlap with live bots.
+      **Rejected:** IBS standalone, turn-of-month (GOLD = drift, not beating random entry), NR7 / inside-day
+      breakouts, Monday turnaround, US-index intraday momentum, Asian-range breakout, H1 intraday dip, stock gap
+      fade/go, FX carry (credits 0.1-0.6bp/night), crypto intraday VBO, session/hour-of-day drift (GOLD 01:00 &
+      crypto 00:00 = stale reopen-quote artifact), pairs mean-reversion (14 pairs), fresh-breakout-dip shorts,
+      big-move fade. **Crypto big-move follow** (BTC/ETH, robust 18/18) rejected as a new bot because all of its
+      profit sits in trades Bots 4/5 already hold. **Watchlist:** pre-holiday US indices; Halloween effect on
+      European indices (GER40 winter +5.8%/yr vs summer +0.1%). **Built:** Dip IBS filter + Bot 7 (above).
+- [x] **`cpds` 2026-11-26:** 225 tests pass, ruff + mypy clean. Commits `1bcf282` (Dip IBS filter) and
+      `fa43129` (Bot 7 + research) pushed to the fork. "Deploy" = local processes: all 5 bots (Dip/Trend/VBO/
+      CBO/FBD) restarted onto `fa43129` at 09:52-09:53, heartbeats ok, zero errors, open trades reloaded
+      (Trend 1, VBO 2). CI only runs on `main`/PRs, so no CI run for this branch. xm-web untouched.
 
 ### QA
-- [x] Functional tests passed: 212 unit tests + integration/replay, all green as of 2026-11-21
+- [x] Functional tests passed: 225 tests (unit + integration/replay), all green as of 2026-11-26
 - [x] Edge cases tested per bot: demo-account refusal, kill-file pause, daily-loss limit, one-position-per-symbol,
       time stops, exit-rule parity with backtest, late-entry skip, reversal (bot 4), account-wide risk breaker
       (tripped-blocks-entry and cap-disabled-at-zero cases, isolated from the real on-disk `data/*/trades.json`)
