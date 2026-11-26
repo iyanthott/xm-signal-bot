@@ -51,8 +51,10 @@ processes on Adrian's PC have been restarted twice this session, most recently o
       CHFJPY positive in both halves for all 18 nearby parameter sets. Caveat: AUD/CAD/NZD-JPY fail the same
       rule (selection risk); the 3 pairs often enter together (46 shared days) - account risk cap applies.
       Added to `risk_guard.DEFAULT_STATE_FILES` (all bots restarted so every process counts it) and to
-      `weekly_report.py`. 9 new unit tests incl. live-vs-research signal parity. **Web dashboard NOT wired yet**
-      (`XM_FBD_WEB_TOKEN` empty - needs a prod Bot row + token via xm-web `create-strategy-bots`; Adrian's call).
+      `weekly_report.py`. 9 new unit tests incl. live-vs-research signal parity. **Web dashboard wired
+      2026-11-26:** FBD added to xm-web `create-strategy-bots.ts` (xm-web `24c68c9`), workflow run 45744718380
+      created Bot "FBD" + token (other 5 bots untouched), token in `.env` as `XM_FBD_WEB_TOKEN` (never committed),
+      Bot 7 restarted with `web_report=True`; token verified against prod (HTTP 200; bogus token 401).
 - [x] `research/strategy_lab.py` + `research/daily_lab.py` — reusable backtest tooling, ~140-market universe
       research behind bots 3 and 4 (committed 2026-11-19)
 - [ ] No placeholders / stub code remaining — true for bots 1-4; M1 backtest validation never finished (noted gap)
