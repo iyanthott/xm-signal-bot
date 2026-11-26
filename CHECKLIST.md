@@ -1,7 +1,9 @@
 # CHECKLIST.md — trading-signal-bot ("Poging Kita" bots)
 Living record per CLAUDE.md §7. Updated the same session work ships.
-Last updated: 2026-11-26 (Bot 7 Fresh-Breakout Dip added on CHFJPY/GBPJPY/EURJPY; Dip bot IBS entry filter on
-US500/NAS100; `research/edge_lab.py` broad research rounds 1-3 - see entries below; 5 live bots, all on `fa43129`).
+Last updated: 2026-11-26 PM (Bot 8 Open Gap Fade on NAS100 + its cash-close fix; dashboard "connected" check-in
+for every strategy bot; Bot 8 wired to the dashboard; HF 10+/day research rejected - see entries below; 6 live bots).
+Earlier 2026-11-26: Bot 7 Fresh-Breakout Dip added on CHFJPY/GBPJPY/EURJPY; Dip bot IBS entry filter on
+US500/NAS100; `research/edge_lab.py` broad research rounds 1-3.
 Previous: 2026-11-21 (account-wide risk breaker; 7 new symbols across bots 3/4/5/6; W7 web reporter LIVE
 with real prod tokens (Dip/Trend/VBO/CBO/M1 each got their own Bot + token via `create-strategy-bots.yml`,
 main bot reuses its existing one); then a security/code review found and fixed 3 bugs (atomic trades.json
@@ -55,6 +57,27 @@ processes on Adrian's PC have been restarted twice this session, most recently o
       2026-11-26:** FBD added to xm-web `create-strategy-bots.ts` (xm-web `24c68c9`), workflow run 45744718380
       created Bot "FBD" + token (other 5 bots untouched), token in `.env` as `XM_FBD_WEB_TOKEN` (never committed),
       Bot 7 restarted with `web_report=True`; token verified against prod (HTTP 200; bogus token 401).
+- [x] Bot 8 — Open Gap Fade (magic 570038), `[GAP]`, NAS100 (US100Cash), `scripts/run_gap_bot.ps1`
+      (2026-11-26). Rule: at 16:30 server (09:30 New York) compare the 16:30 M1 open with the previous session's
+      23:00 server cash close (close of the 22:30 M30 bar); if |move| >= 0.75 x 14-day ATR%, trade AGAINST it at
+      market within 120s of the open; 1xATR stop; flat at 19:00 server (no swap). Backtest (`edge_lab.py
+      gap_fade`, NAS100 M30 2018-2026): 179 trades, ~52% win, PF 1.35 at 1.5x spread / 1.52 at 1x, train 1.32 /
+      test 1.42, max DD 3.0R; edge sits in the first 30 min and is stronger since 2022 (2019/2021 lost). Every
+      fill logged vs the 16:30 open in `data/gap/fills.csv` + Telegram (slippage in bp). In `risk_guard` +
+      `weekly_report.py`. **Fix same day (before its first trade):** the bot first used the D1 close as "previous
+      close" (last tick of the day, incl. ~1h of after-hours drift) - on 2018-2026 data that cut PF 1.52->1.30
+      and changed 61 signal days; on live data 2026-11-26 the two differed by 0.4%. Now `prev_cash_close()`
+      matches the backtest, and skips the day when the previous session closed early (as the backtest does).
+      13 unit tests. **Dashboard:** GAP added to xm-web `create-strategy-bots.ts` (xm-web `8fa6389`), workflow
+      run 45761832255 created Bot "GAP" + token (others untouched), token in `.env` as `XM_GAP_WEB_TOKEN`
+      (never committed), Bot 8 running with `web_report=True`.
+- [x] **Dashboard "Never connected" fix (2026-11-26):** the site's Online/last-seen badge is driven only by
+      `POST /api/bot/status`, which only the retired settings bot ever sent - Bots 3-7 were reporting account +
+      trades fine (all 5 tokens verified HTTP 200) but never checked in. `WebTradeReporter` now also posts a
+      status check-in each 60s cycle, echoing the site's current settings version (read from
+      `/api/bot/settings`, cached 10 min; strategy bots take rules from `.env`, so there is nothing to apply).
+      Bot-side only, no xm-web deploy. 3 new/updated tests. All 6 bots restarted 13:30, zero website errors.
+      Adrian can archive "Adrian's bot" and "M1" on the Bots page (retired 2026-11-24).
 - [x] `research/strategy_lab.py` + `research/daily_lab.py` — reusable backtest tooling, ~140-market universe
       research behind bots 3 and 4 (committed 2026-11-19)
 - [ ] No placeholders / stub code remaining — true for bots 1-4; M1 backtest validation never finished (noted gap)
@@ -192,9 +215,20 @@ processes on Adrian's PC have been restarted twice this session, most recently o
       `fa43129` (Bot 7 + research) pushed to the fork. "Deploy" = local processes: all 5 bots (Dip/Trend/VBO/
       CBO/FBD) restarted onto `fa43129` at 09:52-09:53, heartbeats ok, zero errors, open trades reloaded
       (Trend 1, VBO 2). CI only runs on `main`/PRs, so no CI run for this branch. xm-web untouched.
+- [x] Research round 4 + gap fade (2026-11-26, `edge_lab.py round4` / `robust_gap`): open-gap fade on US
+      indices -> NAS100 only robust -> **built as Bot 8** (above).
+- [x] High-frequency feasibility (2026-11-26, Adrian wants 10+ trades/day; new `research/hf_lab.py`): 6 classic
+      scalping families (EMA cross, Bollinger revert, Donchian, TWAP revert, RSI2 trend, big-bar fade) on GOLD +
+      NAS100, M5 + M15, settings tuned on train only. **Rejected: 0/24 positive even in train** (best train PF
+      1.02); the only 10+/day candidate (GOLD M5 TWAP revert, 10.7/day) PF 0.84 train / 0.78 test. On this
+      account's spreads, 10+/day is not viable; the only lever left is cheaper costs (XM raw-spread account).
+- [x] **`cpds` 2026-11-26 PM:** 240 tests pass, ruff clean on src+tests; mypy: 16 errors, all pre-existing in
+      `strategy.py` (retired Bot 1/2 engine, untouched) - none in new code. Bot 8 + fix, status check-in, HF and
+      round-4 research committed and pushed to the fork. "Deploy" = local: all 6 bots restarted 13:30, heartbeats
+      ok, zero errors, `web_report=True` on all 6.
 
 ### QA
-- [x] Functional tests passed: 225 tests (unit + integration/replay), all green as of 2026-11-26
+- [x] Functional tests passed: 240 tests (unit + integration/replay), all green as of 2026-11-26 PM
 - [x] Edge cases tested per bot: demo-account refusal, kill-file pause, daily-loss limit, one-position-per-symbol,
       time stops, exit-rule parity with backtest, late-entry skip, reversal (bot 4), account-wide risk breaker
       (tripped-blocks-entry and cap-disabled-at-zero cases, isolated from the real on-disk `data/*/trades.json`)
