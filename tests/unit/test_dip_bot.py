@@ -68,6 +68,8 @@ class FakeMT5:
         )
         self.rates["time"], self.rates["open"], self.rates["close"] = times, c, c
         self.rates["high"], self.rates["low"] = c + 5, c - 5
+        down = np.r_[False, c[1:] < c[:-1]]  # down days close near their low (IBS 0.1), as real dips do
+        self.rates["high"][down], self.rates["low"][down] = c[down] + 9, c[down] - 1
         self.tick_time = int(times[-1]) + 3600  # one hour into the forming day
 
     def advance_tick(self, seconds: int = 30) -> None:
@@ -283,5 +285,51 @@ def test_config_defaults_and_validation():
         and trade.rr == 0.0
     )
     assert dip.markets == {"US500": "US500Cash", "NAS100": "US100Cash"}
+    assert dip.ibs_below == {"US500": 0.35, "NAS100": 0.35}
     with pytest.raises(ValueError):
         load_dip_config({"XM_DIP_RISK_PCT": "5"})
+
+
+def test_ibs_filter_config():
+    assert load_dip_config({"XM_DIP_IBS_FILTER": "off"})[0].ibs_below == {}
+    assert load_dip_config({"XM_DIP_IBS_FILTER": "US500=0.3"})[0].ibs_below == {"US500": 0.3}
+    for bad in ("US500=abc", "US500=1.5", "US500=0"):
+        with pytest.raises(ValueError):
+            load_dip_config({"XM_DIP_IBS_FILTER": bad})
+
+
+def test_live_ibs_signal_matches_research():
+    sys.path.insert(0, str(ROOT / "research"))
+    import strategy_lab as lab
+
+    rng = np.random.default_rng(3)
+    close = 5000 + np.cumsum(rng.normal(0.4, 25, 1500))
+    high = close + rng.uniform(1, 30, 1500)
+    low = close - rng.uniform(1, 30, 1500)
+    df = pd.DataFrame({"close": close, "open": close, "high": high, "low": low})
+    live = dip_signal(df, 15, 0.35).to_numpy()
+    ibs = (close - low) / (high - low)
+    tested = (lab.sig_dip_buy(df, {"rsi2": 15}) == 1) & (ibs < 0.35)
+    assert live.sum() > 5 and (live == tested).all()
+
+
+def _dip_closing_mid_range() -> FakeMT5:
+    mt5 = FakeMT5([*uptrend_then_dip(), 0])
+    mt5.rates["close"][-1] = mt5.rates["close"][-2]
+    c = mt5.rates["close"][-2]
+    mt5.rates["high"][-2], mt5.rates["low"][-2] = c + 5, c - 5  # signal bar closes mid-range: IBS 0.5
+    return mt5
+
+
+def test_ibs_filter_blocks_mid_range_close_on_filtered_market(tmp_path):
+    mt5 = _dip_closing_mid_range()
+    bot, _, _ = make_bot(tmp_path, mt5)  # US500 is filtered by default
+    run_pass(bot, mt5)
+    assert mt5.sent == []
+
+
+def test_unfiltered_market_still_enters_on_mid_range_close(tmp_path):
+    mt5 = _dip_closing_mid_range()
+    bot, _, _ = make_bot(tmp_path, mt5, ibs_below={})
+    run_pass(bot, mt5)
+    assert len(mt5.sent) == 1

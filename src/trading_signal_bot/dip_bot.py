@@ -2,6 +2,8 @@
 
 Rules (exactly what research/strategy_lab.py `dip` backtested, 2011-2026, net of spread and swap):
   entry : daily close above its 200-day average AND RSI(2) below 15  -> buy at the next day's open
+          US500/NAS100 also need IBS=(close-low)/(high-low) < 0.35 (closed near the day's low);
+          research/edge_lab.py: PF 1.47->1.79 / 1.70->2.05, max drawdown roughly -35% (XM_DIP_IBS_FILTER)
   stop  : 2 x ATR(14) of the daily bars below entry (broker-side stop loss)
   exit  : first daily close above its 5-day average -> sell at the next open;
           or after 10 daily bars in the trade (time stop)
@@ -46,6 +48,9 @@ class DipConfig:
         default_factory=lambda: {"US500": "US500Cash", "NAS100": "US100Cash"}
     )
     rsi2_below: float = 15.0
+    # label -> max IBS=(close-low)/(high-low) of the signal bar; markets not listed are unfiltered.
+    # research/edge_lab.py: helps US indices (higher PF, lower drawdown), hurts GBPUSD/CA60.
+    ibs_below: dict[str, float] = field(default_factory=lambda: {"US500": 0.35, "NAS100": 0.35})
     stop_atr: float = 2.0
     max_days: int = 10
     entry_window_hours: float = (
@@ -72,9 +77,22 @@ def load_dip_config(env: Mapping[str, str | None]) -> tuple[DipConfig, TradeConf
         label, _, broker = part.strip().partition("=")
         if label.strip():
             markets[label.strip()] = (broker or label).strip()
+    ibs_raw = (env.get("XM_DIP_IBS_FILTER") or "US500=0.35,NAS100=0.35").strip()
+    ibs_below: dict[str, float] = {}
+    if ibs_raw.lower() not in {"off", "none", "0"}:
+        for part in ibs_raw.split(","):
+            label, _, value = part.strip().partition("=")
+            try:
+                limit = float(value)
+            except ValueError as exc:
+                raise ValueError("XM_DIP_IBS_FILTER must look like US500=0.35,NAS100=0.35") from exc
+            if not (0.0 < limit <= 1.0):
+                raise ValueError("XM_DIP_IBS_FILTER values must be between 0 and 1")
+            ibs_below[label.strip()] = limit
     dip = DipConfig(
         markets=markets,
         rsi2_below=num("XM_DIP_RSI2_BELOW", 15.0, 1.0, 50.0),
+        ibs_below=ibs_below,
         stop_atr=num("XM_DIP_STOP_ATR", 2.0, 0.5, 6.0),
         max_days=int(num("XM_DIP_MAX_DAYS", 10, 1, 30)),
     )
@@ -110,10 +128,15 @@ def _atr(df: pd.DataFrame, n: int = 14) -> pd.Series:
     return tr.ewm(alpha=1 / n, adjust=False).mean()
 
 
-def dip_signal(daily: pd.DataFrame, rsi2_below: float) -> pd.Series:
+def _ibs(daily: pd.DataFrame) -> pd.Series:
+    return ((daily.close - daily.low) / (daily.high - daily.low).replace(0, np.nan)).fillna(0.5)
+
+
+def dip_signal(daily: pd.DataFrame, rsi2_below: float, ibs_below: float | None = None) -> pd.Series:
     """True on each closed daily bar where the entry condition holds."""
     c = daily.close
-    return (c > c.rolling(200).mean()) & (_rsi(c, 2) < rsi2_below)
+    sig = (c > c.rolling(200).mean()) & (_rsi(c, 2) < rsi2_below)
+    return sig & (_ibs(daily) < ibs_below) if ibs_below is not None else sig
 
 
 def exit_on_strength(daily: pd.DataFrame) -> bool:
@@ -194,7 +217,7 @@ class DipBot:
 
         # --- entry
         bar_age_h = (server_now - forming.time).total_seconds() / 3600
-        sig = dip_signal(closed, self.config.rsi2_below)
+        sig = dip_signal(closed, self.config.rsi2_below, self.config.ibs_below.get(label))
         if bool(sig.iloc[-1]) and not any(t.symbol == label for t in self.trader.open_trades()):
             if bar_age_h <= self.config.entry_window_hours:
                 self._enter(label, closed, float(tick.ask), forming.time)
@@ -216,9 +239,16 @@ class DipBot:
         sma200 = float(closed.close.rolling(200).mean().iloc[-1])
         dist = self.config.stop_atr * atr
         now = datetime.now(timezone.utc)
+        ibs_limit = self.config.ibs_below.get(label)
+        ibs_note = (
+            f"; closed in the bottom {ibs_limit:.0%} of its range (IBS {float(_ibs(closed).iloc[-1]):.2f})"
+            if ibs_limit is not None
+            else ""
+        )
         self.notify(
             f"[DIP] SIGNAL {label} BUY (daily dip in an uptrend)\n"
-            f"Close {closed.close.iloc[-1]:.2f} above 200-day avg {sma200:.2f}; RSI(2) {rsi2:.1f} < {self.config.rsi2_below:g}\n"
+            f"Close {closed.close.iloc[-1]:.2f} above 200-day avg {sma200:.2f}; RSI(2) {rsi2:.1f} < {self.config.rsi2_below:g}"
+            f"{ibs_note}\n"
             f"Plan: stop {self.config.stop_atr:g}x daily ATR ({dist:.2f}); exit on first close above the 5-day avg "
             f"or after {self.config.max_days} days"
         )
@@ -300,11 +330,12 @@ def main() -> None:
     os_signal.signal(os_signal.SIGINT, lambda *_: stop.update(flag=True))
     with single_instance_lock(args.lock_file):
         LOG.warning(
-            "DIP BOT started trading=%s markets=%s risk=%s%% rsi2<%s stop=%sxATR max_days=%s",
+            "DIP BOT started trading=%s markets=%s risk=%s%% rsi2<%s ibs_filter=%s stop=%sxATR max_days=%s",
             trade_cfg.enabled,
             dip_cfg.markets,
             trade_cfg.risk_pct,
             dip_cfg.rsi2_below,
+            dip_cfg.ibs_below,
             dip_cfg.stop_atr,
             dip_cfg.max_days,
         )
