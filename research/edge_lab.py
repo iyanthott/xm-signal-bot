@@ -951,6 +951,223 @@ def robust3() -> None:
         print("     windows:", " | ".join(_windows(base, df)))
 
 
+# ---------------------------------------------------------------- round 4
+XS_INDICES = ["US500Cash", "US100Cash", "US30Cash", "GER40Cash", "UK100Cash", "FRA40Cash", "EU50Cash", "JP225Cash",
+              "AUS200Cash", "HK50Cash", "SWI20Cash", "SpainCash", "IT40Cash", "NETH25Cash"]
+XS_FX = ["EURUSD", "GBPUSD", "AUDUSD", "NZDUSD", "USDJPY", "USDCHF", "USDCAD", "EURJPY", "GBPJPY", "CHFJPY",
+         "AUDJPY", "CADJPY", "EURGBP", "EURCHF"]
+
+
+def _panel(syms: list[str]) -> tuple[dict[str, pd.DataFrame], dict[str, dict]]:
+    meta = json.loads((D1 / "meta.json").read_text())
+    out, metas = {}, {}
+    for s in syms:
+        if s not in meta:
+            continue
+        df = pd.read_csv(D1 / f"{s}.csv", parse_dates=["time"])
+        df["date"] = df.time.dt.normalize()
+        out[s] = df.set_index("date")
+        metas[s] = _conservative(meta[s])
+    return out, metas
+
+
+def xs_weekly(syms: list[str], pick: str = "worst", k: int = 1, trend: bool = True) -> pd.DataFrame:
+    """Every Friday close: rank markets by 5-day return / (ATR% x sqrt 5). Buy the k worst (or best) that
+    are above their SMA200 (if trend) at Monday's open, sell at Friday's close. 5 swap nights charged
+    (Wed triple). Reports net bp per pick and the same-week equal-weight average of ALL markets (beta)."""
+    data, metas = _panel(syms)
+    feats = {}
+    for s, df in data.items():
+        a = atr(df.reset_index(), 14).to_numpy() / df.close.to_numpy()
+        feats[s] = pd.DataFrame({
+            "z": (df.close / df.close.shift(5) - 1).to_numpy() / (a * np.sqrt(5)),
+            "up": (df.close > df.close.rolling(200).mean()).to_numpy(),
+            "o": df.open.to_numpy(), "c": df.close.to_numpy(),
+        }, index=df.index)
+    fridays = sorted(set().union(*[set(f.index[f.index.dayofweek == 4]) for f in feats.values()]))
+    rows = []
+    for fri in fridays:
+        mon, nfri = fri + pd.Timedelta(days=3), fri + pd.Timedelta(days=7)
+        cand, all_r = [], []
+        for s, f in feats.items():
+            if fri not in f.index or mon not in f.index or nfri not in f.index or not np.isfinite(f.at[fri, "z"]):
+                continue
+            m = metas[s]
+            net = f.at[nfri, "c"] / f.at[mon, "o"] - 1 - m["spread_frac"] - 5 * m["swap_long_frac"]
+            all_r.append(net)
+            if not trend or f.at[fri, "up"]:
+                cand.append((f.at[fri, "z"], s, net))
+        if len(all_r) < len(feats) * 0.6 or not cand:
+            continue
+        cand.sort(key=lambda x: x[0], reverse=(pick == "best"))
+        for _, s, net in cand[:k]:
+            rows.append((mon, s, net * 1e4, float(np.mean(all_r)) * 1e4))
+    return pd.DataFrame(rows, columns=["time", "sym", "bp", "bench_bp"])
+
+
+def month_end_usd() -> pd.DataFrame:
+    """Melvin-Prins month-end hedge rebalancing: at the close two trading days before month end, if US500
+    has outperformed the average of GER40/UK100/JP225/EU50 month-to-date, sell USD on the last trading day
+    (open -> close, no swap); if it underperformed, buy USD. Pooled over 6 USD pairs."""
+    eq, _ = _panel(["US500Cash", "GER40Cash", "UK100Cash", "JP225Cash", "EU50Cash"])
+    fx, fm = _panel(["EURUSD", "GBPUSD", "AUDUSD", "USDJPY", "USDCHF", "USDCAD"])
+    usd_base = {"USDJPY", "USDCHF", "USDCAD"}
+    closes = pd.DataFrame({s: d.close for s, d in eq.items()}).dropna()
+    month = closes.index.to_period("M")
+    rows = []
+    for _, g in closes.groupby(month):
+        if len(g) < 10:
+            continue
+        sig_day, last_day = g.index[-3], g.index[-1]
+        prev_month_end = closes.index[closes.index < g.index[0]]
+        if not len(prev_month_end):
+            continue
+        base = closes.loc[prev_month_end[-1]]
+        mtd = closes.loc[sig_day] / base - 1
+        diff = mtd["US500Cash"] - mtd[["GER40Cash", "UK100Cash", "JP225Cash", "EU50Cash"]].mean()
+        usd_dir = -1 if diff > 0 else 1  # US outperformed -> foreigners sell USD
+        for s, d in fx.items():
+            if last_day not in d.index:
+                continue
+            d_pair = usd_dir if s in usd_base else -usd_dir
+            o, c = d.at[last_day, "open"], d.at[last_day, "close"]
+            net = d_pair * (c / o - 1) - fm[s]["spread_frac"]
+            rows.append((last_day, s, net * 1e4, diff * 100))
+    return pd.DataFrame(rows, columns=["time", "sym", "bp", "us_minus_rest_pct"])
+
+
+def trend_pyramid(sym: str, k: float = 2.0, hold: int = 2) -> None:
+    """Bot 4 (55/20 Donchian, 2xATR stop) alone vs. Bot 4 plus one add-on unit (same risk) after any day
+    that moves > k x ATR in the open position's direction, held `hold` days. Equity in R, both sides."""
+    from daily_lab import signals as dl_signals
+
+    df, m = _load_d1(sym)
+    o, h, lo, c = (df[x].to_numpy() for x in ("open", "high", "low", "close"))
+    a = atr(df, 14).to_numpy()
+    e, xl, xs = dl_signals(df, "breakout")
+    base = sim_next_open(df, m, e, xl, xs, 120)
+    pos = np.zeros(len(df), int)
+    for j, r in zip(base.t, base.r, strict=False):
+        d = int(e[j - 1])
+        stop = o[j] - d * 2 * a[j - 1]
+        k_ = j
+        while k_ < len(df) - 1:
+            pos[k_] = d
+            if (d == 1 and lo[k_] <= stop) or (d == -1 and h[k_] >= stop) or (xl[k_] if d == 1 else xs[k_]) \
+                    or k_ - j + 1 >= 120:
+                break
+            k_ += 1
+        _ = r
+    mv = c - np.r_[np.nan, c[:-1]]
+    a_prev = np.r_[np.nan, a[:-1]]
+    big = np.where(mv > k * a_prev, 1, np.where(mv < -k * a_prev, -1, 0))
+    add_sig = np.where((big != 0) & (big == pos), big, 0)
+    none = np.zeros(len(df), bool)
+    add = sim_next_open(df, m, add_sig, none, none, hold + 1, hold_close=hold)
+
+    def curve(res_list: list[Result]) -> tuple[float, float, int]:
+        ev = sorted((t, r) for res in res_list for t, r in zip(res.t, res.r, strict=False))
+        eq = np.cumsum([r for _, r in ev]) if ev else np.array([0.0])
+        return float(eq[-1]), float(np.max(np.maximum.accumulate(eq) - eq)), len(ev)
+
+    b_tot, b_dd, b_n = curve([base])
+    p_tot, p_dd, p_n = curve([base, add])
+    tr, te, al = split_stats(add, df, 0.3)
+    print(f"  {sym:9s} Bot4 alone: {b_n} trades, {b_tot:+.1f}R, maxDD {b_dd:.1f}R, R/DD {b_tot / max(b_dd, 1e-9):.2f} | "
+          f"+add-ons: {p_n} trades, {p_tot:+.1f}R, maxDD {p_dd:.1f}R, R/DD {p_tot / max(p_dd, 1e-9):.2f} | "
+          f"add-ons alone n{al.get('n')} PF{al.get('PF')} train {tr.get('PF')} test {te.get('PF')}")
+
+
+def run_round4() -> None:
+    print("=== cross-sectional weekly: buy the k most-oversold (vol-adjusted 5-day) markets in an uptrend ===")
+    for name, syms in (("indices", XS_INDICES), ("fx", XS_FX)):
+        for pick in ("worst", "best"):
+            for k in (1, 2):
+                r = xs_weekly(syms, pick, k)
+                if r.empty:
+                    continue
+                r["excess"] = r.bp - r.bench_bp
+                half = int(len(r) * 0.7)
+                print(f"  {name:7s} {pick:5s} k{k}: {_bp_stats(r)} | excess vs all-market avg: "
+                      f"train {r.excess.iloc[:half].mean():+.1f}bp test {r.excess.iloc[half:].mean():+.1f}bp", flush=True)
+    print("\n=== month-end USD hedge-rebalancing flow (last trading day, open->close) ===")
+    me = month_end_usd()
+    print(f"  pooled 6 pairs: {_bp_stats(me)}")
+    strong = me[me.us_minus_rest_pct.abs() > 2]
+    print(f"  only months with |US - rest| > 2%: {_bp_stats(strong)}")
+    print("  by pair:", me.groupby("sym").bp.mean().round(1).to_dict())
+    print("\n=== Bot 4 pyramiding on big moves (k=2 ATR, hold 2) ===")
+    for sym in ("BTCUSD", "ETHUSD", "JP225Cash", "Netflix"):
+        trend_pyramid(sym)
+
+
+GAP_SESS = {"US500": (1630, 2245), "NAS100": (1630, 2245), "US30": (1630, 2245), "GER40": (1000, 1815)}
+
+
+def gap_fade(key: str, tf: str = "M15", thr: float = 0.5, spread_mult: float = 1.0, stop_atr: float | None = None,
+             side: int = 0, entry_hm: int | None = None, exit_hm: int | None = None) -> pd.DataFrame:
+    """Fade the overnight move into the cash open. Overnight = prior session's last bar close -> entry bar's
+    open. If |overnight| >= thr x daily ATR%, trade against it from the entry bar's open to the exit bar's
+    close (same day, no swap). side=+1 only buys gap-downs, -1 only sells gap-ups, 0 both. Optional stop at
+    stop_atr x daily ATR from entry (checked on bar highs/lows; worst case if touched). Net bp of price."""
+    open_hm, close_hm = GAP_SESS[key]
+    if tf == "H1":
+        open_hm, close_hm = (1700, 2200) if open_hm == 1630 else (1000, 1800)
+    elif tf == "M30":
+        close_hm = 2230 if open_hm == 1630 else 1800
+    e_hm, x_hm = entry_hm or open_hm, exit_hm or close_hm
+    df = load(key, tf)
+    df["date"], df["hm"] = df.time.dt.date, df.time.dt.hour * 100 + df.time.dt.minute
+    df["sp"] = spread_mult * cost(key, df) / df.close.to_numpy()
+    d1 = df.groupby("date").agg(h=("high", "max"), lo=("low", "min"), c=("close", "last"))
+    atrp = ((d1.h - d1.lo) / d1.c).rolling(14).mean().shift()
+    days = {d: g.set_index("hm") for d, g in df.groupby("date")}
+    keys = sorted(days)
+    rows = []
+    for prev, cur in zip(keys[:-1], keys[1:], strict=False):
+        p, g = days[prev], days[cur]
+        if close_hm not in p.index or e_hm not in g.index or x_hm not in g.index:
+            continue
+        a = atrp.get(cur, np.nan)
+        if not np.isfinite(a):
+            continue
+        on = g.at[e_hm, "open"] / p.at[close_hm, "close"] - 1
+        if abs(on) < thr * a:
+            continue
+        d = -1 if on > 0 else 1
+        if side and d != side:
+            continue
+        entry = g.at[e_hm, "open"]
+        exit_px = g.at[x_hm, "close"]
+        if stop_atr:
+            stop = entry * (1 - d * stop_atr * a)
+            seg = g.loc[e_hm:x_hm]
+            if (d == 1 and seg.low.min() <= stop) or (d == -1 and seg.high.max() >= stop):
+                exit_px = stop
+        rows.append((pd.Timestamp(cur), (d * (exit_px / entry - 1) - g.at[e_hm, "sp"]) * 1e4))
+    return pd.DataFrame(rows, columns=["time", "bp"])
+
+
+def robust_gap() -> None:
+    for key in ("US500", "NAS100", "US30", "GER40"):
+        print(f"\n=== {key} gap fade ===")
+        for thr in (0.4, 0.5, 0.6, 0.75, 1.0):
+            r = gap_fade(key, thr=thr)
+            r2 = gap_fade(key, thr=thr, spread_mult=2.0)
+            print(f"  M15 thr{thr}: {_bp_stats(r)}\n      2x spread: {_bp_stats(r2)}")
+        print("  -- thr 0.5 variants --")
+        for label, kw in (("buy gap-downs only", {"side": 1}), ("sell gap-ups only", {"side": -1}),
+                          ("stop 0.5xATR", {"stop_atr": 0.5}), ("stop 1xATR", {"stop_atr": 1.0}),
+                          ("exit 19:00/13:00", {"exit_hm": 1845 if key != "GER40" else 1245}),
+                          ("enter +30m", {"entry_hm": 1700 if key != "GER40" else 1030})):
+            print(f"  {label:18s}: {_bp_stats(gap_fade(key, thr=0.5, **kw))}")
+        h = gap_fade(key, tf="H1", thr=0.5)
+        if not h.empty:
+            yr = h.groupby(h.time.dt.year).bp.agg(["count", "mean"]).round(1)
+            print(f"  H1 long history (enter 17:00/10:00) thr0.5 from {h.time.iloc[0].date()}: {_bp_stats(h)}")
+            print("   by year (n, mean bp):", {int(y): (int(v['count']), v['mean']) for y, v in yr.iterrows()})
+
+
 def run_round3() -> None:
     print("=== pairs mean reversion (z>2 on 20-day log ratio; bp of one leg, net) ===")
     for a_, b_ in PAIRS:
@@ -983,7 +1200,7 @@ def run_round3() -> None:
 if __name__ == "__main__":
     ap = argparse.ArgumentParser()
     ap.add_argument("cmd", choices=["daily", "intraday", "robust_ibs", "robust_tom", "round2", "gold_session",
-                                    "crypto", "round3", "robust3"])
+                                    "crypto", "round3", "robust3", "round4", "robust_gap"])
     ap.add_argument("--test-frac", type=float, default=0.3)
     ap.add_argument("--only", nargs="*")
     ap.add_argument("--sym", nargs="*", default=[])
@@ -1000,6 +1217,10 @@ if __name__ == "__main__":
         run_round3()
     elif a.cmd == "robust3":
         robust3()
+    elif a.cmd == "round4":
+        run_round4()
+    elif a.cmd == "robust_gap":
+        robust_gap()
     elif a.cmd == "gold_session":
         gold_session(stop_atr_d=1.0)
         gold_session(stop_atr_d=None)

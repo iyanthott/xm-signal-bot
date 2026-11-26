@@ -35,6 +35,7 @@ class Scenario(str, Enum):
     VOL_BREAKOUT = "VOL_BREAKOUT"  # daily volatility breakout bot (vbo_bot.py)
     BREAKOUT_CANDLE = "BREAKOUT_CANDLE"  # daily candle-confirmed breakout bot (cbo_bot.py)
     FRESH_DIP = "FRESH_DIP"  # daily fresh-breakout dip bot (fbd_bot.py)
+    GAP_FADE = "GAP_FADE"  # intraday open gap fade bot (gap_bot.py)
 
 
 class TriggerMode(str, Enum):

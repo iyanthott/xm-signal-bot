@@ -9,6 +9,7 @@ retried until the website confirms them. Never raises; a website outage never af
 from __future__ import annotations
 
 import logging
+import time
 from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -22,6 +23,9 @@ from trading_signal_bot.trader import ClosedTrade, DemoTrader
 
 ACCOUNT_PATH = "/api/bot/account"
 TRADES_PATH = "/api/bot/trades"
+STATUS_PATH = "/api/bot/status"
+SETTINGS_PATH = "/api/bot/settings"
+VERSION_REFRESH_SECONDS = 600
 MAX_BUFFERED_CLOSED = 100
 LOG = logging.getLogger("WebTradeReporter")
 
@@ -76,6 +80,8 @@ class WebTradeReporter:
         self._headers = {"Authorization": f"Bearer {cfg.token}", "Accept": "application/json"}
         self._pending_closed: list[ClosedTrade] = []
         self._log = LOG
+        self._version = 0
+        self._version_checked = float("-inf")
 
     def on_closed(self, trade: ClosedTrade) -> None:
         self._pending_closed.append(trade)
@@ -91,6 +97,28 @@ class WebTradeReporter:
             self._report_trades(trader)
         except Exception:
             self._log.exception("reporting trades failed")
+        try:
+            self._report_status()
+        except Exception:
+            self._log.exception("reporting the status check-in failed")
+
+    def _report_status(self) -> None:
+        """Check-in that drives the website's Online / last-seen badge. Strategy bots take their rules from .env,
+        not from website settings, so they echo the site's current settings version (refreshed every 10 min) -
+        there is nothing for them to apply, and echoing it keeps the badge from showing a false 'updating'."""
+        now = time.monotonic()
+        if now - self._version_checked >= VERSION_REFRESH_SECONDS:
+            self._version_checked = now
+            try:
+                resp = self._http.get(self._cfg.base_url + SETTINGS_PATH, headers=self._headers,
+                                      timeout=self._cfg.timeout_seconds)
+                if resp.status_code == 200:
+                    version = resp.json().get("version")
+                    if isinstance(version, int) and version >= 0:
+                        self._version = version
+            except (requests.RequestException, ValueError) as exc:
+                self._log.warning("could not read the settings version: %s", type(exc).__name__)
+        self._post(STATUS_PATH, {"runningVersion": self._version})
 
     def _report_account(self, mt5: Any) -> None:
         info = mt5.account_info()

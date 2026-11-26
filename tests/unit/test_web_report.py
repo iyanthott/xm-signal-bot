@@ -19,9 +19,11 @@ class FakeResp:
 
 
 class FakeSession:
-    def __init__(self, responses: list[Any]) -> None:
+    def __init__(self, responses: list[Any], settings: Any = None) -> None:
         self.responses = list(responses)
         self.calls: list[dict[str, Any]] = []
+        self.gets: list[str] = []
+        self.settings: Any = {"version": 3} if settings is None else settings
 
     def post(self, url: str, **kw: Any) -> FakeResp:
         self.calls.append({"url": url, **kw})
@@ -29,6 +31,16 @@ class FakeSession:
         if isinstance(r, Exception):
             raise r
         return r
+
+    def get(self, url: str, **kw: Any) -> Any:
+        self.gets.append(url)
+        if isinstance(self.settings, Exception):
+            raise self.settings
+        return NS(status_code=200, json=lambda: self.settings)
+
+
+def posts_to(s: FakeSession, path: str) -> list[dict[str, Any]]:
+    return [c for c in s.calls if c["url"].endswith(path)]
 
 
 def make_closed(ticket: int = 1, **over: Any) -> ClosedTrade:
@@ -95,11 +107,29 @@ def test_reports_account_and_open_trades() -> None:
     }]
 
 
-def test_no_account_info_or_no_trades_sends_nothing() -> None:
+def test_no_account_info_or_no_trades_sends_only_the_check_in() -> None:
     s = FakeSession([])
     r = WebTradeReporter(CFG, session=s)
     r.report(FakeTrader([]), FakeMt5(None))
-    assert s.calls == []
+    assert [c["url"] for c in s.calls] == ["https://example.test/api/bot/status"]
+
+
+def test_status_check_in_echoes_the_site_settings_version_and_caches_it() -> None:
+    s = FakeSession([], settings={"version": 3})
+    r = WebTradeReporter(CFG, session=s)
+    r.report(FakeTrader([]), FakeMt5(ACCT))
+    r.report(FakeTrader([]), FakeMt5(ACCT))
+    status = posts_to(s, "/api/bot/status")
+    assert [c["json"] for c in status] == [{"runningVersion": 3}, {"runningVersion": 3}]
+    assert status[0]["headers"]["Authorization"] == "Bearer xmbot_abc"
+    assert s.gets == ["https://example.test/api/bot/settings"], "version is cached, not fetched every minute"
+
+
+def test_status_check_in_still_sent_when_settings_unreadable() -> None:
+    s = FakeSession([], settings=requests.ConnectionError("down"))
+    r = WebTradeReporter(CFG, session=s)
+    r.report(FakeTrader([]), FakeMt5(None))
+    assert [c["json"] for c in posts_to(s, "/api/bot/status")] == [{"runningVersion": 0}]
 
 
 def test_closed_trades_are_buffered_via_on_closed_and_cleared_only_once_delivered() -> None:
