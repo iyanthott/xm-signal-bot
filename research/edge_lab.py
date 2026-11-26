@@ -788,10 +788,202 @@ def run_crypto() -> None:
         crypto_hour_table(sym)
 
 
+# ---------------------------------------------------------------- round 3
+PAIRS = [
+    ("US500Cash", "US30Cash"), ("US500Cash", "US100Cash"), ("US100Cash", "US2000Cash"), ("GER40Cash", "EU50Cash"),
+    ("FRA40Cash", "EU50Cash"), ("UK100Cash", "EU50Cash"), ("GOLD", "SILVER"), ("EURUSD", "GBPUSD"),
+    ("AUDUSD", "NZDUSD"), ("EURJPY", "GBPJPY"), ("BTCUSD", "ETHUSD"), ("OILCash", "BRENTCash"),
+    ("US500Cash", "GER40Cash"), ("AUS200Cash", "JP225Cash"),
+]
+
+
+def pairs_revert(a_sym: str, b_sym: str, look: int = 20, z_in: float = 2.0, max_days: int = 10) -> pd.DataFrame:
+    """Daily log-ratio z-score (look-day mean/std). |z| > z_in at the close -> next open: short the rich
+    leg, long the cheap leg, equal notional. Exit next open after z crosses 0, or after max_days.
+    P&L in bp of one leg's notional, net of both legs' spread (1.5x) and each leg's swap charge."""
+    meta = json.loads((D1 / "meta.json").read_text())
+    ma, mb = _conservative(meta[a_sym]), _conservative(meta[b_sym])
+    a = pd.read_csv(D1 / f"{a_sym}.csv", parse_dates=["time"]).set_index("time")
+    b = pd.read_csv(D1 / f"{b_sym}.csv", parse_dates=["time"]).set_index("time")
+    j = a[["open", "close"]].join(b[["open", "close"]], lsuffix="_a", rsuffix="_b", how="inner").reset_index()
+    lr = np.log(j.close_a / j.close_b)
+    z = ((lr - lr.rolling(look).mean()) / lr.rolling(look).std()).to_numpy()
+    oa, ob, t = j.open_a.to_numpy(), j.open_b.to_numpy(), j.time.to_numpy()
+    rows, i, n = [], look + 1, len(j) - 1
+    while i < n:
+        if not np.isfinite(z[i]) or abs(z[i]) < z_in:
+            i += 1
+            continue
+        da = -1 if z[i] > 0 else 1  # a rich -> short a, long b
+        e = i + 1
+        k = e
+        while k < n and (k - e + 1) < max_days and not (np.sign(z[k]) != np.sign(z[i]) or z[k] == 0):
+            k += 1
+        x = k + 1 if k < n else n
+        nights = max(int((t[x] - t[e]) / np.timedelta64(1, "D")), 0)
+        ra = da * (oa[x] / oa[e] - 1)
+        rb = -da * (ob[x] / ob[e] - 1)
+        swap = nights * ((ma["swap_long_frac"] if da == 1 else ma["swap_short_frac"])
+                         + (mb["swap_long_frac"] if da == -1 else mb["swap_short_frac"]))
+        net = (ra + rb) / 2 - (ma["spread_frac"] + mb["spread_frac"]) / 2 - swap / 2
+        rows.append((t[e], net * 1e4))
+        i = x
+    return pd.DataFrame(rows, columns=["time", "bp"])
+
+
+def _bp_stats(df: pd.DataFrame, test_frac: float = 0.3) -> str:
+    if df.empty:
+        return "n0"
+    cut = int(len(df) * (1 - test_frac))
+
+    def s(x: pd.Series) -> str:
+        w, l_ = x[x > 0].sum(), -x[x <= 0].sum()
+        return f"n{len(x)} win{100 * (x > 0).mean():.0f}% PF{(w / l_ if l_ > 0 else np.inf):.2f} avg{x.mean():.1f}bp"
+
+    return f"ALL {s(df.bp)} | TRAIN {s(df.bp.iloc[:cut])} | TEST {s(df.bp.iloc[cut:])}"
+
+
+def halloween(sym: str) -> None:
+    """Long from the first trading day of November to the last of April, every year, vs. the other half.
+    Net of 1.5x spread once per year and the broker's long swap every calendar night."""
+    df, m = _load_d1(sym)
+    df["y"], df["mo"] = df.time.dt.year, df.time.dt.month
+    rows = []
+    for y in range(df.y.min(), df.y.max()):
+        w = df[((df.y == y) & (df.mo >= 11)) | ((df.y == y + 1) & (df.mo <= 4))]
+        s = df[(df.y == y + 1) & (df.mo >= 5) & (df.mo <= 10)]
+        for name, seg in (("winter", w), ("summer", s)):
+            if len(seg) < 100:
+                continue
+            nights = (seg.time.iloc[-1] - seg.time.iloc[0]).days
+            gross = seg.close.iloc[-1] / seg.open.iloc[0] - 1
+            rows.append((name, y, 100 * (gross - m["spread_frac"] - nights * m["swap_long_frac"]), 100 * gross))
+    r = pd.DataFrame(rows, columns=["half", "yr", "net%", "gross%"])
+    g = r.groupby("half")
+    print(f"  {sym:11s} " + " | ".join(
+        f"{h}: n{len(x)} net avg {x['net%'].mean():+.1f}% (gross {x['gross%'].mean():+.1f}%) yrs+ {(x['net%'] > 0).sum()}"
+        for h, x in g))
+
+
+def fresh_breakout_dip(df: pd.DataFrame, m: dict, side: int = 1) -> Result:
+    """Momentum-gated dip: a 20-day high within the last 10 days and close > SMA50, then RSI(2) < 10 ->
+    buy next open; exit next open after a close above the prior day's high, or 5 days; 2 x ATR stop.
+    side=-1 mirrors it (fresh 20-day low, close < SMA50, RSI(2) > 90)."""
+    from strategy_lab import rsi
+
+    c, h, lo = df.close, df.high, df.low
+    sma50, r2 = c.rolling(50).mean(), rsi(c, 2)
+    if side == 1:
+        fresh = (h >= h.rolling(20).max()).rolling(10).max().astype(bool)
+        e = np.where(fresh & (c > sma50) & (r2 < 10), 1, 0)
+    else:
+        fresh = (lo <= lo.rolling(20).min()).rolling(10).max().astype(bool)
+        e = np.where(fresh & (c < sma50) & (r2 > 90), -1, 0)
+    return sim_next_open(df, m, e, (c > h.shift()).to_numpy(), (c < lo.shift()).to_numpy(), 5)
+
+
+def big_move(df: pd.DataFrame, m: dict, mode: str) -> Result:
+    """Day after a close-to-close move larger than 2 x ATR(14): 'fade' trades against it, 'follow' with it.
+    Enter next open, exit that day's close (no swap)."""
+    c = df.close
+    a = atr(df, 14).shift()
+    mv = c - c.shift()
+    d = np.where(mv > 2 * a, 1, np.where(mv < -2 * a, -1, 0))
+    if mode == "fade":
+        d = -d
+    none = np.zeros(len(df), bool)
+    return sim_next_open(df, m, d, none, none, 5, hold_close=1)
+
+
+def fbd_param(df: pd.DataFrame, m: dict, look: int, recent: int, rsi_lvl: float, max_days: int = 5) -> Result:
+    from strategy_lab import rsi
+
+    c, h = df.close, df.high
+    fresh = (h >= h.rolling(look).max()).rolling(recent).max().astype(bool)
+    e = np.where(fresh & (c > c.rolling(50).mean()) & (rsi(c, 2) < rsi_lvl), 1, 0)
+    x = (c > h.shift()).to_numpy()
+    return sim_next_open(df, m, e, x, x, max_days)
+
+
+def bigmove_param(df: pd.DataFrame, m: dict, k: float, hold: int) -> Result:
+    c = df.close
+    a = atr(df, 14).shift()
+    mv = c - c.shift()
+    d = np.where(mv > k * a, 1, np.where(mv < -k * a, -1, 0))
+    none = np.zeros(len(df), bool)
+    return sim_next_open(df, m, d, none, none, hold + 1, hold_close=hold)
+
+
+def robust3() -> None:
+    from daily_lab import signals as dl_signals
+
+    print("=== fresh-breakout dip: grid look{10,20,40} x recent{5,10} x rsi2<{5,10,15} ===")
+    for sym in ("CHFJPY", "EURJPY", "GBPJPY", "US2000Cash", "GER40Cash", "HK50Cash", "JP225Cash", "BTCUSD",
+                "ETHUSD", "US500Cash", "US100Cash"):
+        df, m = _load_d1(sym)
+        both = tot = 0
+        pfs = []
+        for look in (10, 20, 40):
+            for recent in (5, 10):
+                for lvl in (5, 10, 15):
+                    tr, te, al = split_stats(fbd_param(df, m, look, recent, lvl), df, 0.3)
+                    tot += 1
+                    both += int((tr.get("expR") or -1) > 0 and (te.get("expR") or -1) > 0)
+                    pfs.append(al.get("PF", 0))
+        base = fbd_param(df, m, 20, 10, 10)
+        e, xl, xs = dl_signals(df, "dip_long")
+        dip = sim_next_open(df, m, e, xl, xs, 10).stats()
+        busy = _dip_positions(df, m)
+        only_new = Result(base.r[~busy[base.t - 1]], base.t[~busy[base.t - 1]]).stats() if base.n else {}
+        print(f"  {sym:11s} combos +both {both}/{tot}, PF median {np.median(pfs):.2f} min {np.min(pfs):.2f} | "
+              f"base {base.stats()} | dip_long PF {dip.get('PF')} n{dip.get('n')} | "
+              f"not-in-Dip-trade PF {only_new.get('PF')} n{only_new.get('n')}")
+        print("     windows:", " | ".join(_windows(base, df)))
+    print("\n=== big-move follow (crypto): grid k{1.5,2,2.5,3} x hold{1,2,3} ===")
+    for sym in ("BTCUSD", "ETHUSD"):
+        df, m = _load_d1(sym)
+        for k in (1.5, 2.0, 2.5, 3.0):
+            for hold in (1, 2, 3):
+                tr, te, al = split_stats(bigmove_param(df, m, k, hold), df, 0.3)
+                print(f"  {sym} k{k} hold{hold}  n{al.get('n')} win{al.get('win%')} PF{al.get('PF')} "
+                      f"exp{al.get('expR')} DD{al.get('maxDD_R')} | train PF{tr.get('PF')} test PF{te.get('PF')}")
+        base = bigmove_param(df, m, 2.0, 1)
+        print("     windows:", " | ".join(_windows(base, df)))
+
+
+def run_round3() -> None:
+    print("=== pairs mean reversion (z>2 on 20-day log ratio; bp of one leg, net) ===")
+    for a_, b_ in PAIRS:
+        for z_in in (2.0, 2.5):
+            print(f"  {a_}/{b_} z>{z_in}: {_bp_stats(pairs_revert(a_, b_, z_in=z_in))}", flush=True)
+    print("\n=== Halloween (long Nov-Apr vs May-Oct, net of swap) ===")
+    for sym in ("US500Cash", "US100Cash", "US30Cash", "GER40Cash", "UK100Cash", "EU50Cash", "FRA40Cash",
+                "JP225Cash", "AUS200Cash"):
+        halloween(sym)
+    meta = {k: _conservative(v) for k, v in json.loads((D1 / "meta.json").read_text()).items()}
+    rows = []
+    for sym, m in meta.items():
+        df = pd.read_csv(D1 / f"{sym}.csv", parse_dates=["time"])
+        for name, fn in (("fbd_long", lambda d_, m_: fresh_breakout_dip(d_, m_, 1)),
+                         ("fbd_short", lambda d_, m_: fresh_breakout_dip(d_, m_, -1)),
+                         ("bigmove_fade", lambda d_, m_: big_move(d_, m_, "fade")),
+                         ("bigmove_follow", lambda d_, m_: big_move(d_, m_, "follow"))):
+            res = fn(df, m)
+            tr, te, al = split_stats(res, df, 0.3)
+            rows.append({"class": m["class"], "symbol": sym, "strategy": name, "n": al.get("n", 0),
+                         "win%": al.get("win%"), "PF": al.get("PF"), "expR": al.get("expR"),
+                         "maxDD_R": al.get("maxDD_R"), "train_n": tr.get("n", 0), "train_PF": tr.get("PF"),
+                         "train_expR": tr.get("expR"), "test_n": te.get("n", 0), "test_PF": te.get("PF"),
+                         "test_win%": te.get("win%"), "test_expR": te.get("expR")})
+    out = pd.DataFrame(rows)
+    out.to_csv(D1.parent / "edge_round3_results.csv", index=False)
+    report(out)
+
+
 if __name__ == "__main__":
     ap = argparse.ArgumentParser()
     ap.add_argument("cmd", choices=["daily", "intraday", "robust_ibs", "robust_tom", "round2", "gold_session",
-                                    "crypto"])
+                                    "crypto", "round3", "robust3"])
     ap.add_argument("--test-frac", type=float, default=0.3)
     ap.add_argument("--only", nargs="*")
     ap.add_argument("--sym", nargs="*", default=[])
@@ -804,6 +996,10 @@ if __name__ == "__main__":
         run_round2()
     elif a.cmd == "crypto":
         run_crypto()
+    elif a.cmd == "round3":
+        run_round3()
+    elif a.cmd == "robust3":
+        robust3()
     elif a.cmd == "gold_session":
         gold_session(stop_atr_d=1.0)
         gold_session(stop_atr_d=None)

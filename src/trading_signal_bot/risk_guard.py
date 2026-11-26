@@ -1,5 +1,5 @@
 """Account-wide open-risk circuit breaker, shared by every DemoTrader instance on this MT5
-account (main, M1, Dip, Trend, VBO, CBO all run their own DemoTrader with their own state_file).
+account (main, M1, Dip, Trend, VBO, CBO, FBD all run their own DemoTrader with their own state_file).
 
 Each bot persists its own open trades (ticket -> risk_money, exit_reason) in its own
 state_file. This sums risk_money across every known state file for trades still open
@@ -20,6 +20,7 @@ DEFAULT_STATE_FILES: tuple[Path, ...] = (
     Path("data/trend/trades.json"),
     Path("data/vbo/trades.json"),
     Path("data/cbo/trades.json"),
+    Path("data/fbd/trades.json"),
 )
 
 

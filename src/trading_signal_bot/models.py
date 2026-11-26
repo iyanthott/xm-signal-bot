@@ -34,6 +34,7 @@ class Scenario(str, Enum):
     TREND_BREAKOUT = "TREND_BREAKOUT"  # daily crypto trend bot (trend_bot.py)
     VOL_BREAKOUT = "VOL_BREAKOUT"  # daily volatility breakout bot (vbo_bot.py)
     BREAKOUT_CANDLE = "BREAKOUT_CANDLE"  # daily candle-confirmed breakout bot (cbo_bot.py)
+    FRESH_DIP = "FRESH_DIP"  # daily fresh-breakout dip bot (fbd_bot.py)
 
 
 class TriggerMode(str, Enum):
