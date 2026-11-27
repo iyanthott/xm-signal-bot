@@ -1,7 +1,12 @@
 # CHECKLIST.md — trading-signal-bot ("Poging Kita" bots)
 Living record per CLAUDE.md §7. Updated the same session work ships.
-Last updated: 2026-11-26 PM (Bot 8 Open Gap Fade on NAS100 + its cash-close fix; dashboard "connected" check-in
-for every strategy bot; Bot 8 wired to the dashboard; HF 10+/day research rejected - see entries below; 6 live bots).
+Last updated: 2026-11-27 (false-discovery check on the whole daily_lab.py research program: dip_long's
+edge [Bot 3] confirmed real, not noise; macd_trend/ichimoku rejections confirmed noise, not just pooled-
+negative; breakout [Bot 4/6] moderately supported. Earlier same day: two new-indicator rounds - MACD/CCI/
+Keltner, then Parabolic SAR/Ichimoku/Pivot-Point - all six rejected, Bollinger mean_reversion confirmed dead.
+No live code changed; still 6 live bots.
+Earlier 2026-11-26 PM: Bot 8 Open Gap Fade on NAS100 + its cash-close fix; dashboard "connected" check-in
+for every strategy bot; Bot 8 wired to the dashboard; HF 10+/day research rejected - see entries below; 6 live bots.
 Earlier 2026-11-26: Bot 7 Fresh-Breakout Dip added on CHFJPY/GBPJPY/EURJPY; Dip bot IBS entry filter on
 US500/NAS100; `research/edge_lab.py` broad research rounds 1-3.
 Previous: 2026-11-21 (account-wide risk breaker; 7 new symbols across bots 3/4/5/6; W7 web reporter LIVE
@@ -222,6 +227,73 @@ processes on Adrian's PC have been restarted twice this session, most recently o
       NAS100, M5 + M15, settings tuned on train only. **Rejected: 0/24 positive even in train** (best train PF
       1.02); the only 10+/day candidate (GOLD M5 TWAP revert, 10.7/day) PF 0.84 train / 0.78 test. On this
       account's spreads, 10+/day is not viable; the only lever left is cheaper costs (XM raw-spread account).
+- [x] New-indicator research round (2026-11-27, `research/daily_lab.py`): three signals genuinely untried before
+      (MACD, CCI, Keltner Channel - distinct from the SMA/RSI/ADX/Donchian/IBS/Bollinger family already tested
+      and from LWMA+Stochastic, the retired Bot 1/2 engine), same fixed-rule/no-per-market-tuning discipline,
+      full cached 111-symbol D1 universe, 70/30 train/test, same pass bar (n>=40, test_n>=15, train/test
+      expR>0, train PF>=1.1, test PF>=1.2). **All three rejected as new bots:**
+      - `macd_trend` (12/26/9 cross + SMA200 filter, exit opposite cross/60d): pooled avg_expR negative in
+        fx/index/stock/energy, barely positive pooled in crypto (+0.225) and metal (+0.104). Only 3/166
+        market passes (XRPUSD, SILVER, GOLD), low win% (15-38%) carried by a few big trend trades - noisy,
+        not robust.
+      - `cci_dip` (CCI(20) <-100/>100 + SMA200 filter, exit CCI crosses 0/10d): pooled avg_expR **negative in
+        every asset class** (crypto -0.256 through stock -0.175). Only 3/166 passes (EURGBP, CADJPY,
+        Merck&Co), PF 1.18-1.66 - cherry-picked noise, not an edge. Confirms RSI(2)/IBS-style dip entries
+        (already live in Bot 3) beat a typical-price oscillator on the same shape.
+      - `keltner_breakout` (close vs EMA20+/-2xATR20, exit back through EMA20/120d): pooled avg_expR positive
+        only in crypto (+0.522, 2/10 markets: BTCUSD, ETHUSD) and negative everywhere else (index -0.307,
+        stock -0.274, fx -0.166). The only passes that look real (BTCUSD, ETHUSD, Tesla) sit on markets Bot 4
+        (Trend) already trades with its own Donchian engine - no incremental diversification even if it held up.
+      Also confirmed from the existing `strategy_lab.py` M15 three-strategy grid (never individually logged
+      here): Bollinger-band `mean_reversion` (ADX-filtered fade, cited in Bot 1's retirement note) is decisively
+      dead - 10/11 markets test-negative, the one GBPJPY pass unconvincing on 96 test trades. No live code
+      changed; `daily_lab.py` gained the 3 new strategy functions (kept for reference) and `data/lab/d1_results.csv`
+      was regenerated with them included.
+- [x] Second new-indicator research round (2026-11-27, same session, same `daily_lab.py`/discipline/universe/pass
+      bar): Parabolic SAR, Ichimoku Cloud, classic Pivot-Point bounce - **all three rejected as new bots:**
+      - `parabolic_sar` (Wilder stop-and-reverse flip, no SMA filter - the indicator is already a complete trend
+        system; exit is the opposite flip, not a fixed-days rule): **0/166 markets pass.** Pooled avg_expR
+        negative or ~0 everywhere (fx -0.089, stock -0.267, index -0.086, energy -0.047, crypto -0.032, metal
+        +0.006). Textbook case of an indicator that looks great traced on a chart and bleeds on cost-adjusted
+        chop - confirms it needs a regime/trend filter to be viable at all, which would make it a tuned variant,
+        not the fixed rule this lab tests.
+      - `ichimoku` (Tenkan/Kijun cross gated on cloud position, Senkou spans lagged 26d so no look-ahead):
+        **2/166 passes** (GOLD, BTCUSD), both already traded live (Bot 6 CBO on GOLD, Bot 4 Trend on BTC) - no
+        diversification value even if real. Pooled avg_expR weakly positive only in crypto (+0.114, 1/10) and
+        metal (+0.085, 1/4), negative in fx/index/stock/energy.
+      - `pivot_bounce` (yesterday's floor-trader S1/R1, bounce in the SMA200 trend direction, exit at the
+        pivot/10d): **0/166 passes.** Pooled avg_expR negative in every asset class (fx -0.060 through stock
+        -0.208) - a single day's H/L/C is too noisy a support/resistance level on this account's costs; the
+        55-day Donchian channel already live in Bots 4/6 is the more robust version of "react to a
+        recent extreme." No live code changed; `daily_lab.py` gained 1 helper (`_parabolic_sar`) + 3 more
+        strategy functions; `d1_results.csv` regenerated again with all 12 daily strategies now tested (9
+        rejected categories total across both rounds, 3 live: dip_long->Bot3, breakout->Bot4/6, vol_breakout->Bot5).
+- [x] **Multiple-testing / false-discovery check (2026-11-27, new `research/noise_check.py`)**: `daily_lab.py`
+      has now run 12 strategies x ~110 markets (~1,284 combos) through one pass bar and found 25 passes -
+      with that many hypotheses tried, nobody had checked how many passes chance alone would produce. Method:
+      label-shuffle Monte Carlo - replace a strategy's real entries with the same trade count at random bars
+      on the same market/costs/stop/holding-period cap (25 seeds x 103-106 markets x 3 holding-period buckets,
+      trade counts taken from `dip_long`/10d, `macd_trend`/60d, `breakout`/120d as frequency references only).
+      **Result: empirical null pass rate 1.28% (96/7,525 trials) -> ~16.4 chance passes expected in the real
+      grid vs. 25 actually found** - a modest, not overwhelming, excess on its own (~2 sigma). The real finding
+      is in the breakdown, not the aggregate:
+      - **10-day bucket (dip_long's family): null rate 0.27%** -> ~1.4 chance passes expected for that family's
+        ~525 real combos, vs. **8 actually found** (dip_long 5, cci_dip 3) - a >5x excess, not explainable by
+        chance. **Confirms Bot 3's backbone edge is real**, not a multiple-testing artifact.
+      - **60-day bucket (macd_trend/holy_grail/ichimoku's family): null rate 2.11%**, highest of the three ->
+        the ~5 real passes in this family sit AT OR BELOW what chance alone predicts. **Quantitatively confirms
+        this session's `macd_trend`/`ichimoku` rejections were correct** - not just "pooled negative," literally
+        indistinguishable from noise.
+      - **120-day bucket (breakout/breakout_candle/keltner's family): null rate 1.43%** -> ~4 expected vs. 9
+        found, a ~2x excess. Moderate support for `breakout` (Bots 4/6) beyond this check alone - those bots
+        also have a live forward-trading track record the backtest-only strategies don't.
+      **Caveats (not full coverage):** `vol_breakout` (Bot 5's backbone) uses a different stop-order entry
+      mechanic and wasn't tested by this script; `holy_grail`'s real 15-day cap was approximated inside the
+      60-day bucket rather than matched exactly. A follow-up covering those properly is still open.
+      **Process takeaway:** the fixed pass bar (n>=40, test_n>=15, PF thresholds) is not tight enough alone to
+      rule out noise at this many combinations - a label-shuffle check like this one should run as a standard
+      last step on any future research round before calling a result "robust," not just on request. No live
+      code changed; results in `data/lab/noise_check_results.csv`.
 - [x] **`cpds` 2026-11-26 PM:** 240 tests pass, ruff clean on src+tests; mypy: 16 errors, all pre-existing in
       `strategy.py` (retired Bot 1/2 engine, untouched) - none in new code. Bot 8 + fix, status check-in, HF and
       round-4 research committed and pushed to the fork. "Deploy" = local: all 6 bots restarted 13:30, heartbeats

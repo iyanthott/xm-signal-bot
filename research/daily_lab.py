@@ -18,6 +18,27 @@ Fixed rules, identical for every market (no per-market tuning, so a "pass" is no
                    range, sell stop at open - 0.5 x range; fills at the stop level itself (not the open) if
                    touched intraday, skipped if both levels are touched the same day; stop 2 x ATR14; exit
                    at the close after 5 days if neither stop is hit
+  macd_trend     : MACD(12,26) line crosses above its 9-day signal line while close > SMA200 -> buy
+                   (mirror: cross below while close < SMA200 -> sell); exit on the opposite MACD/signal
+                   cross or after 60 days; stop 2 x ATR14. New indicator vs. the SMA/RSI/ADX family above.
+  cci_dip        : CCI(20) (typical-price distance from its mean, scaled by mean absolute deviation) <
+                   -100 while close > SMA200 -> buy (mirror: CCI > 100 while close < SMA200 -> sell);
+                   exit when CCI crosses back through 0 or after 10 days; stop 2 x ATR14. Same dip-in-an-
+                   uptrend shape as dip_long but a different oscillator (typical price, not RSI).
+  keltner_breakout: close crosses above EMA20 + 2 x ATR20 -> buy (mirror: below EMA20 - 2 x ATR20 -> sell);
+                   a volatility-adaptive channel instead of breakout's fixed 55-day high/low. Exit on a
+                   close back through EMA20 or after 120 days; stop 2 x ATR14.
+  parabolic_sar  : Wilder's stop-and-reverse. Buy when the SAR flips from down- to up-trend, sell on the
+                   mirror flip; exit on the opposite flip (the SAR trail itself, not a fixed-days rule) or
+                   after 250 days (safety cap only); stop 2 x ATR14. No SMA200 filter - the indicator is
+                   already a complete trend system.
+  ichimoku       : Tenkan(9) crosses above Kijun(26) while close is above the cloud (max of Senkou A/B,
+                   each lagged 26 days so no look-ahead) -> buy; mirror -> sell. Exit on the opposite
+                   Tenkan/Kijun cross or after 60 days; stop 2 x ATR14.
+  pivot_bounce   : classic floor-trader pivot from yesterday's H/L/C. Close > SMA200 and today's low
+                   touches S1 (support) then closes back above it -> buy (mirror: close < SMA200, high
+                   touches R1, closes back below -> sell); exit on a close back through the pivot or
+                   after 10 days; stop 2 x ATR14.
 Costs: 1.5x spread (max of live and recent bar median) and the broker's actual swap for that direction
 (charges only; swap credits are ignored), both scaled to the price at the time.
 
@@ -36,7 +57,7 @@ import numpy as np
 import pandas as pd
 
 sys.path.insert(0, str(Path(__file__).parent))
-from strategy_lab import Result, atr, rsi  # noqa: E402
+from strategy_lab import Result, atr, ema, rsi  # noqa: E402
 
 D1 = Path("data/lab/d1")
 
@@ -159,6 +180,34 @@ def _adx_di(df: pd.DataFrame, n: int = 14) -> tuple[pd.Series, pd.Series, pd.Ser
     return dx.ewm(alpha=1 / n, adjust=False).mean(), pdi, mdi
 
 
+def _parabolic_sar(h: np.ndarray, lo: np.ndarray, af_step: float = 0.02, af_max: float = 0.2) -> np.ndarray:
+    """Wilder's Parabolic SAR. Returns trend per bar (+1 up, -1 down) - the stop itself is not needed here,
+    only its flips (entry trigger and trailing exit in one indicator, unlike every fixed-days exit above)."""
+    n = len(h)
+    trend = np.ones(n, dtype=int)
+    sar = np.full(n, lo[0])
+    ep, af = h[0], af_step
+    for i in range(1, n):
+        new_sar = sar[i - 1] + af * (ep - sar[i - 1])
+        if trend[i - 1] == 1:
+            new_sar = min(new_sar, lo[i - 1], lo[i - 2] if i >= 2 else lo[i - 1])
+            if lo[i] < new_sar:
+                trend[i], sar[i], ep, af = -1, ep, lo[i], af_step
+            else:
+                trend[i], sar[i] = 1, new_sar
+                if h[i] > ep:
+                    ep, af = h[i], min(af + af_step, af_max)
+        else:
+            new_sar = max(new_sar, h[i - 1], h[i - 2] if i >= 2 else h[i - 1])
+            if h[i] > new_sar:
+                trend[i], sar[i], ep, af = 1, ep, h[i], af_step
+            else:
+                trend[i], sar[i] = -1, new_sar
+                if lo[i] < ep:
+                    ep, af = lo[i], min(af + af_step, af_max)
+    return trend
+
+
 def signals(df: pd.DataFrame, strat: str) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """Returns (entry direction per bar, exit-long flag per bar, exit-short flag per bar), evaluated at the close."""
     o, h, lo, c = df.open, df.high, df.low, df.close
@@ -185,6 +234,68 @@ def signals(df: pd.DataFrame, strat: str) -> tuple[np.ndarray, np.ndarray, np.nd
         dn = strong_dn & (h >= sma20) & (c < sma20)
         entry = np.where(up, 1, np.where(dn, -1, 0))
         return entry, (c < sma20).to_numpy(), (c > sma20).to_numpy()
+    if strat == "macd_trend":
+        sma200 = c.rolling(200).mean()
+        macd_line = ema(c, 12) - ema(c, 26)
+        signal_line = ema(macd_line, 9)
+        above, below = macd_line > signal_line, macd_line < signal_line
+        cross_up = above & ~above.shift(1).fillna(False)
+        cross_dn = below & ~below.shift(1).fillna(False)
+        up = cross_up & (c > sma200)
+        dn = cross_dn & (c < sma200)
+        entry = np.where(up, 1, np.where(dn, -1, 0))
+        return entry, below.to_numpy(), above.to_numpy()
+    if strat == "cci_dip":
+        sma200 = c.rolling(200).mean()
+        tp = (h + lo + c) / 3
+        tp_sma = tp.rolling(20).mean()
+        mad = (tp - tp_sma).abs().rolling(20).mean()
+        cci = (tp - tp_sma) / (0.015 * mad.replace(0, np.nan))
+        up = (c > sma200) & (cci < -100)
+        dn = (c < sma200) & (cci > 100)
+        entry = np.where(up, 1, np.where(dn, -1, 0))
+        return entry, (cci > 0).fillna(False).to_numpy(), (cci < 0).fillna(False).to_numpy()
+    if strat == "keltner_breakout":
+        mid, a20 = ema(c, 20), atr(df, 20)
+        upper, lower = mid + 2 * a20, mid - 2 * a20
+        above, below = c > upper, c < lower
+        cross_up = above & ~above.shift(1).fillna(False)
+        cross_dn = below & ~below.shift(1).fillna(False)
+        entry = np.where(cross_up, 1, np.where(cross_dn, -1, 0))
+        return entry, (c < mid).to_numpy(), (c > mid).to_numpy()
+    if strat == "parabolic_sar":
+        trend = _parabolic_sar(h.to_numpy(), lo.to_numpy())
+        up_trend = trend == 1
+        flip_up = up_trend & ~np.roll(up_trend, 1)
+        flip_up[0] = False
+        flip_dn = ~up_trend & np.roll(up_trend, 1)
+        flip_dn[0] = False
+        entry = np.where(flip_up, 1, np.where(flip_dn, -1, 0))
+        return entry, (~up_trend), up_trend
+    if strat == "ichimoku":
+        tenkan = (h.rolling(9).max() + lo.rolling(9).min()) / 2
+        kijun = (h.rolling(26).max() + lo.rolling(26).min()) / 2
+        span_a = ((tenkan + kijun) / 2).shift(26)
+        span_b = ((h.rolling(52).max() + lo.rolling(52).min()) / 2).shift(26)
+        cloud_top, cloud_bot = pd.concat([span_a, span_b], axis=1).max(axis=1), pd.concat(
+            [span_a, span_b], axis=1
+        ).min(axis=1)
+        above = tenkan > kijun
+        cross_up = above & ~above.shift(1).fillna(False)
+        cross_dn = ~above & above.shift(1).fillna(False)
+        up = cross_up & (c > cloud_top)
+        dn = cross_dn & (c < cloud_bot)
+        entry = np.where(up, 1, np.where(dn, -1, 0))
+        return entry, (~above).to_numpy(), above.to_numpy()
+    if strat == "pivot_bounce":
+        ph, pl, pc = h.shift(), lo.shift(), c.shift()
+        piv = (ph + pl + pc) / 3
+        s1, r1 = 2 * piv - ph, 2 * piv - pl
+        sma200 = c.rolling(200).mean()
+        up = (c > sma200) & (lo <= s1) & (c > s1)
+        dn = (c < sma200) & (h >= r1) & (c < r1)
+        entry = np.where(up, 1, np.where(dn, -1, 0))
+        return entry, (c < piv).to_numpy(), (c > piv).to_numpy()
     hi55, lo55 = h.rolling(55).max().shift(), lo.rolling(55).min().shift()
     hi20, lo20 = h.rolling(20).max().shift(), lo.rolling(20).min().shift()
     if strat == "breakout_candle":
@@ -198,6 +309,8 @@ def signals(df: pd.DataFrame, strat: str) -> tuple[np.ndarray, np.ndarray, np.nd
 MAX_DAYS = {
     "dip_long": 10, "rally_short": 10, "breakout": 120, "engulf_pullback": 10,
     "breakout_candle": 120, "holy_grail": 15, "vol_breakout": 5,
+    "macd_trend": 60, "cci_dip": 10, "keltner_breakout": 120,
+    "parabolic_sar": 250, "ichimoku": 60, "pivot_bounce": 10,
 }
 
 
