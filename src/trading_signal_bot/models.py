@@ -36,6 +36,9 @@ class Scenario(str, Enum):
     BREAKOUT_CANDLE = "BREAKOUT_CANDLE"  # daily candle-confirmed breakout bot (cbo_bot.py)
     FRESH_DIP = "FRESH_DIP"  # daily fresh-breakout dip bot (fbd_bot.py)
     GAP_FADE = "GAP_FADE"  # intraday open gap fade bot (gap_bot.py)
+    P2_BB_BREAKOUT = "P2_BB_BREAKOUT"  # Power of 2 forward-test: Bollinger breakout (p2_forwardtest_bot.py)
+    P2_SESSION_OVERLAP = "P2_SESSION_OVERLAP"  # Power of 2 forward-test: session-overlap momentum
+    P2_DONCHIAN_SCALP = "P2_DONCHIAN_SCALP"  # Power of 2 forward-test: short Donchian scalp
 
 
 class TriggerMode(str, Enum):
