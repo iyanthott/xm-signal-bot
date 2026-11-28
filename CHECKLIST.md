@@ -1,6 +1,10 @@
 # CHECKLIST.md — trading-signal-bot ("Poging Kita" bots)
 Living record per CLAUDE.md §7. Updated the same session work ships.
-Last updated: 2026-11-27 (false-discovery check on the whole daily_lab.py research program: dip_long's
+Last updated: 2026-11-28 (Set 2 "Power of 2" research all-rejected but deployed live anyway for validation per
+Adrian's explicit request; Set 3 "3rd AI" thematic equity research + initial basket built; end-of-day shutdown -
+all processes (6 Long Waiting + P2 forward-test + ai3 retry supervisor) stopped, computer powering off - both
+P2 and Set 3's basket need manual relaunch before Monday's open to actually fire. See entries below.)
+Previous: 2026-11-27 (false-discovery check on the whole daily_lab.py research program: dip_long's
 edge [Bot 3] confirmed real, not noise; macd_trend/ichimoku rejections confirmed noise, not just pooled-
 negative; breakout [Bot 4/6] moderately supported. Earlier same day: two new-indicator rounds - MACD/CCI/
 Keltner, then Parabolic SAR/Ichimoku/Pivot-Point - all six rejected, Bollinger mean_reversion confirmed dead.
@@ -298,6 +302,85 @@ processes on Adrian's PC have been restarted twice this session, most recently o
       `strategy.py` (retired Bot 1/2 engine, untouched) - none in new code. Bot 8 + fix, status check-in, HF and
       round-4 research committed and pushed to the fork. "Deploy" = local: all 6 bots restarted 13:30, heartbeats
       ok, zero errors, `web_report=True` on all 6.
+- [x] **Set 2 "Power of 2" — total-across-10-20-bots reframe of the recurring high-frequency ask (2026-11-28,
+      Adrian confirmed total not per-bot).** Scope: own separate risk breaker (not Set 1's shared 5% cap),
+      widened universe (FX majors + more crypto added), mixed M5/M15. `research/power_of_2_lab.py`:
+      - **Round 1:** 14 new day-trading archetypes (ORB-family, VWAP reversion, momentum ignition, pivot
+        bounce, BB/Keltner breakout, intraday RSI2, EMA ribbon, 3-bar reversal, volume breakout, session-
+        overlap momentum, short Donchian, MACD/stoch cross, inside-bar breakout, ATR-expansion fade) x widened
+        universe x M15 (+5 markets M5) = 277 combos. **0/277 passed both train+test at a meaningful frequency.**
+        Best "passes": `bb_breakout` NAS100 M15 (PF 1.01/1.07, 0.37/day), `session_overlap_momentum` GOLD M15
+        (PF 1.01/1.02, 0.89/day) - both razor-thin, disqualified on frequency. `stoch_cross` (flagged a priori
+        as resembling the retired losing Bot 1/2 engine) was the single worst performer, confirming that
+        suspicion.
+      - **Round 2 (M1/M5 gap-fill, same session):** crypto M1 spread never checked before - BTCUSD 216%,
+        ETHUSD 411%, SOLUSD 1825% of median move, all *worse* than the already-dead EURUSD M1 (127%); none
+        backtested, correctly disqualified on the ratio alone. M5 extended to the full widened universe (10
+        new markets): 209 more combos, **0/209 passed**, worse than the original 5-market M5 pass (best PF
+        0.58-0.82). `stoch_cross` SOLUSD hit 15.35 trades/day at PF 0.66 - highest frequency found all project,
+        confirming frequency without edge just compounds losses faster.
+      - **Verdict: no Power of 2 bot clears this project's normal bar.** Adrian pushed back on the "thousands
+        of M1/M5 traders" framing and asked to run live anyway as a validation test, not a rebuild - see next
+        entry. Research files left uncommitted-then-committed this session (was going to follow the
+        hf_lab.py/edge_lab.py convention of staying uncommitted, but `cpds` commits everything real this time).
+- [x] **Power of 2 forward-test bot (2026-11-28, `src/trading_signal_bot/p2_forwardtest_bot.py`,
+      `scripts/run_p2_forwardtest_bot.ps1`), EXPERIMENTAL, explicitly NOT a bot that cleared research.** Runs
+      the only 3 archetypes from the round above with any signal of life live on demo: `bb_breakout`/NAS100,
+      `session_overlap_momentum`/GOLD (both marginal passes), `donchian_scalp`/NAS100 (didn't clear train,
+      included only because it's the highest-frequency near-miss and Adrian wanted to see a live signal).
+      Magics **570040-570042** (fresh range after Set 1's 570030s). Risk bumped 0.1%->0.3% same day (0.1% was
+      below NAS100's min lot, would have silently blocked every trade) - own separate `XM_P2_RISK_CAP_PCT`
+      breaker, not pooled with Set 1's `risk_guard.DEFAULT_STATE_FILES`. Alerts route to Adrian's PERSONAL
+      Telegram (`XM_P2_CHAT_ID`), never the shared group. Deployed Saturday - `donchian_scalp` fired a real
+      NAS100 BUY signal within the first minute, correctly rejected `10018 Market closed` (expected, not a bug -
+      no US-index/metal fill is possible on a weekend regardless of strategy). No web dashboard wiring (kept
+      out of xm-web deliberately - this is a local experiment, not a production bot).
+- [x] **Set 3 "3rd AI" thematic equity research + initial basket (2026-11-28).** New set, distinct from Sets
+      1-2: equity/CFD buy-and-hold on AI-supply-chain companies, not a mechanical signal strategy. Scope
+      (Adrian's picks): execute via XM MT5 CFD (same account), capital decided after seeing candidates,
+      semi-automated (propose a buy, Adrian approves), broad supply-chain definition (not just pure-play AI/
+      chips). Round 1: ~26 candidates across chips/semi-equipment/robotics/data-center-infra/networking/cloud,
+      all cross-checked against the broker's 1,370-symbol stock CFD universe, each requiring concrete evidence
+      (disclosed AI revenue %, named sole-supplier position, or a specific deal/backlog) - sector membership
+      alone didn't qualify. Honest gaps, not forced: no rare-earth magnet play exists on this broker (MP
+      Materials/Lynas aren't listed), no Japan robotics either (broker lists zero Japanese stocks). SKF (bearing
+      proxy for "joints") and Super Micro Computer (real AI revenue but 2024 accounting-scandal history) flagged
+      as weaker than the rest. Round 2 (cheap/small-cap search, same bar, no padding): only 5 defensible
+      sub-$65 names found, not the 8-15 targeted. Best: **ON Semiconductor** (AI data-center power chips, +175%
+      YoY AI revenue, named Nvidia MGX/AWS deals) - treated as equal-quality to the mega-cap picks. Flagged
+      mixed/risky: Baidu (China delisting risk), Unity Software (2023 pricing-fiasco scars), Microchip (AI
+      minor), SailPoint (AI is marketing layer). **Landmine caught:** broker still quotes Juniper Networks
+      (~$39.76) though it stopped trading July 2025 post-HPE acquisition - stale/frozen price, flagged as never
+      a real opportunity. **Initial basket built + queued same day** (Adrian's go-ahead): 8-name buy-and-hold,
+      ~$1,700 (₱100,000 @ ~58-62 PHP/USD, rate uncertain), sized as real UNLEVERAGED exposure despite the
+      account's 1:1000 leverage (deliberately not exploiting the cheap margin) - Nvidia, Broadcom, ASMLHolding,
+      Teradyne, Arista, Eaton, ON-Semiconductor, Palantir, ~$212 each (actual ~$1,730.75 total after lot-size
+      rounding), magics **570050-570057**, no SL/TP (deliberate - conviction holds, not signal trades). State:
+      `data/ai3/positions.json`. `scripts/ai3_initial_buy.py` + `run_ai3_initial_buy.ps1` retry every 12min
+      (3-day safety cap) until all 8 fill. All 8 orders tested live before unattended handoff - clean (right
+      symbols/filling-mode/sizing), rejected only for the expected Saturday closure. **Zero fills yet.**
+- [x] **End-of-day shutdown (2026-11-28, Adrian: "pack-up for the day... close all bots also... shutdown the
+      computer").** All processes force-stopped cleanly: 6 Long Waiting bots, the P2 forward-test bot, AND the
+      ai3 retry supervisor (39 processes total across all the powershell/cmd/python wrapper layers). Verified
+      zero matching processes remain and the 4 existing open positions (Trend BTCUSD +$20.85; VBO ETHUSD -$6.81,
+      BRENTCash -$18.50, OILCash -$16.98) are untouched - stopping bot software never touches broker-side
+      positions. **Operational consequence, not yet resolved:** stopping the ai3 and P2 retry supervisors means
+      neither will auto-fire at Monday's market open anymore - both need to be manually relaunched (MT5
+      terminal first, then `run_p2_forwardtest_bot.ps1` and `run_ai3_initial_buy.ps1`) before/at that point, or
+      the Set 3 basket and the P2 validation signals simply won't execute. Flag this at the start of next
+      session if it's before Monday's open and nothing's been relaunched.
+- [x] **Telegram routing clarified (2026-11-28):** the existing shared `TELEGRAM_CHAT_ID` group (with Jay) is
+      for Set 1 "Long Waiting" only. Adrian's personal chat (`7784416162`) is the destination for Set 2 "Power
+      of 2" and Set 3 "3rd AI" updates specifically, per his explicit "without Jay" request - see
+      `XM_P2_CHAT_ID` in `.env.example`; Set 3 reuses the same mechanism ad hoc (no dedicated env var added yet).
+- [x] **`cpds` 2026-11-28 (end of session):** tests pass (pytest exit 0, same ~240 suite, no new dedicated tests
+      for the two new research-validation bots - consistent with how `hf_lab.py`/`edge_lab.py` were treated, no
+      live-trading-logic bot got shipped without tests, these are explicitly-marked experiments). Commits this
+      session cover: Power of 2 round 1+2 research (`power_of_2_lab.py`), the P2 forward-test bot + its new
+      `Scenario` enum values in `models.py`, the Set 3 initial-buy script + supervisor, and `.env.example`
+      additions for `XM_P2_*`. "Deploy" = local processes, and tonight's deploy is "everything off" per Adrian's
+      explicit pack-up request, not a restart-and-verify - see the shutdown entry above for what that leaves
+      pending for Monday. xm-web untouched this session.
 
 ### QA
 - [x] Functional tests passed: 240 tests (unit + integration/replay), all green as of 2026-11-26 PM
